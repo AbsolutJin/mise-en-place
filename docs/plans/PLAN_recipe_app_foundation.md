@@ -175,7 +175,15 @@ built **auth-ready** so auth is a later addition, not a migration.
   it is phone-reachable with full write + upload access, it MUST run behind a
   VPN / reverse-proxy basic-auth until in-app auth lands. Schema is auth-ready (D2).
 
-## Standardised recipe format (`Recipe`) — draft shape
+## Standardised recipe format (`Recipe`) — locked field list
+> **Locked at GATE 0** and validated against real German + English TikTok captions
+> (three worked examples: a video-only caption with pre-computed macros, a grouped
+> multi-section recipe, and an English one with steps + a storage note). The JSON Schema
+> in `docs/` is the single source of truth, formalised at **T1.2**; the C++ struct and TS
+> type mirror it. Because the format carries **`schemaVersion`**, any refinement found
+> while building the paste parser (T3.x) is a **versioned migration, not a redesign** —
+> the field list can evolve deliberately without breaking stored recipes.
+
 ```jsonc
 {
   "schemaVersion": 1,               // format version, for future migrations
@@ -185,20 +193,44 @@ built **auth-ready** so auth is a later addition, not a migration.
   "description": "string?",
   "sourceUrl": "string?",           // optional source link
   "images": ["string"],             // optional, 0..n URLs
-  "servings": 4,                    // portion count
+  "tags": ["string"],               // 0..n free-form tags; absorbs category/cuisine
+                                    //   (e.g. "Meal Prep", "vegetarisch"). Not scraped
+                                    //   from hashtag walls — user-curated.
+  "servings": 4,                    // portion count (parsed from "4 Portionen"/"Serves 4")
+  "prepTimeMin": 15,                // optional; minutes
+  "cookTimeMin": 25,                // optional; minutes (total time is derived, not stored)
   "totalWeightG": 1200,             // optional; enables accurate per-100g
   "ingredients": [
-    // foodId links to a cached OFF food (from search-and-pick); null = manual/unmatched
-    { "name": "chicken breast", "quantity": 300, "unit": "g", "foodId": "uuid?", "note": "?" }
+    // quantity & unit are BOTH nullable → "to taste" / garnish (e.g. "Salz + Pfeffer",
+    //   "Petersilie zum garnieren"); such rows never contribute to totalWeightG.
+    // group: optional section label, kept flat on each row (e.g. "Für die Sauce",
+    //   "Crispy Beef Strips"). null = ungrouped. Display groups by it; macro summation
+    //   and the Reactive Form stay flat.
+    // unit: one language-neutral vocabulary — g, kg, ml, l, Stück(piece), TL(tsp≈5ml),
+    //   EL(tbsp≈15ml), cup, Prise… ; count/spoon/volume units resolve to grams only when
+    //   a density/piece-weight is known, else they are flagged (per D5).
+    // foodId links to a cached OFF food (from search-and-pick); null = manual/unmatched.
+    // note: free text — captures parentheticals like "(diced)", "(uncooked weight)".
+    {
+      "group": "Für die Sauce?", "name": "chicken breast",
+      "quantity": 300, "unit": "g", "foodId": "uuid?", "note": "?"
+    }
   ],
-  "steps": ["string"],
+  "steps": ["string"],              // flat, ordered; may be empty (video-only captions)
+  "notes": "string?",              // free-form: storage/reheating tips, "next time…"
+  "favorite": false,                // single-user star (chosen over a 1–5 rating)
   "macrosPerServing": { "calories": 0, "protein": 0, "carbs": 0, "fat": 0 },
   // macrosPer100g is DERIVED: perServing × servings ÷ totalWeightG × 100 (null if no weight)
   "macroSource": "ingredients | llm | manual",
+                                    // caption-provided macros fold into "manual"
+                                    //   (the user vets them in the editable preview)
   "createdAt": "iso", "updatedAt": "iso"
 }
 ```
-The JSON Schema in `docs/` is the source of truth; the C++ struct and TS type mirror it.
+**Dropped / folded** (revisit later via `schemaVersion` if missed): `cuisine` and
+`category` → fold into `tags`; `difficulty` → skipped (subjective, low payoff);
+`yield` → `servings` (numeric) is authoritative for the macro math; a numeric
+`rating` → replaced by the boolean `favorite`.
 
 ---
 
@@ -211,11 +243,15 @@ The JSON Schema in `docs/` is the source of truth; the C++ struct and TS type mi
   `cmake --build` succeeds (first build pulls Drogon's deps, slow); app boots; `GET
   /health` returns 200; logs show a successful Postgres connection; re-running the app
   does not re-apply migrations.
-- **T1.2** `Recipe` JSON Schema in `docs/` (source of truth); SQL migrations (`users`
-  stub, `recipes` with nullable `owner_id` **and macro columns — per-serving cal/protein/
-  carbs/fat, `total_weight_g`, `macro_source`**, `ingredients`, `images`); C++ model
-  structs + jsoncpp (de)serialization + a **`valijson` validation function**. *Verify:*
-  migrations apply on a fresh DB; unit test round-trips a `Recipe` struct↔JSON and
+- **T1.2** `Recipe` JSON Schema in `docs/` (source of truth — the **locked field list**
+  above); SQL migrations (`users` stub, `recipes` with nullable `owner_id`, **the recipe
+  metadata columns — `tags`, `prep_time_min`, `cook_time_min`, `notes`, `favorite`** —
+  **and macro columns — per-serving cal/protein/carbs/fat, `total_weight_g`,
+  `macro_source`**, `ingredients` **with nullable `quantity`/`unit`/`group`/`food_id`/`note`
+  and a language-neutral unit vocabulary**, `images`); C++ model structs + jsoncpp
+  (de)serialization + a **`valijson` validation function**. *Verify:* migrations apply on
+  a fresh DB; unit test round-trips a `Recipe` struct↔JSON — including a **grouped,
+  to-taste-ingredient recipe** (null quantity/unit) and an **empty-`steps`** recipe — and
   `valijson` **rejects a schema-invalid document** and accepts a valid one.
 - **T1.3** Recipe repository/service (create, read, list, update, delete) via Drogon
   `DbClient` (`execSqlSync`); per-100 g derived computation. *Verify:* integration tests
@@ -245,9 +281,20 @@ The JSON Schema in `docs/` is the source of truth; the C++ struct and TS type mi
   does not exist until the nutrition DB lands.)_
 
 ## Milestone 3 — Paste import with selectable engine
-- **T3.1** `RecipeParser` interface + `RuleBasedParser` in C++ (sections, quantity/unit
-  regex, hashtag/emoji cleanup) + `POST /api/parse`. *Verify:* unit tests parse 2–3
-  representative caption/website samples into the expected structured fields.
+- **T3.1** `RecipeParser` interface + `RuleBasedParser` in C++ + `POST /api/parse`.
+  Concrete patterns to handle (from the worked German + English caption examples):
+  **ingredient sections** (`🍗 Für das Hähnchen:` / `Crispy Beef Strips` → each row's
+  `group`); **quantity/unit regex** over the language-neutral vocabulary (`600 g`,
+  `140 ml`, `2 Knoblauchzehen`→`Stück`, `1 TL`, `2 tbsp`; a bare `tsp black pepper`
+  defaults to quantity 1); **parentheticals → `note`** (`(diced)`, `(uncooked weight)`,
+  `(tenderises the beef)`); **servings** from prose (`4 Portionen`, `Serves 4`); a
+  **macro block** by label synonyms (`kcal`/`calories`; `Eiweiß`/`Protein`/`P`;
+  `Kohlenhydrate`/`Carbs`/`C`; `Fett`/`Fat`/`F`) in any order → `macrosPerServing`,
+  `macroSource: "manual"`; **hashtag walls + emoji stripped** (never auto-tagged);
+  **to-taste rows** (`Salz + Pfeffer`, `Petersilie zum garnieren`) → null quantity/unit;
+  and any **storage/reheating block → `notes`**. Steps may be absent (video-only). *Verify:*
+  unit tests parse the three representative captions into the expected structured fields,
+  including grouping, null-quantity rows, the extracted macro block, and empty steps.
 - **T3.2** `LlmClient` + `LlmParser` (OpenAI-compatible call, schema validation, fallback
   on invalid). *Verify:* unit test with a **mocked** HTTP/LLM response asserts valid JSON
   is accepted and malformed JSON triggers the documented fallback (no live LLM in tests).
