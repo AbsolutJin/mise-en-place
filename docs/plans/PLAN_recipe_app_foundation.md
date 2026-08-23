@@ -335,9 +335,15 @@ built **auth-ready** so auth is a later addition, not a migration.
 - **T5.1** Image upload endpoint (Drogon multipart → disk volume) + external-URL option;
   type/size validation. *Verify:* uploading a valid image attaches it to a recipe and
   renders; oversized/wrong-type is rejected (API test).
-- **T5.2** Browse **search/filter** (title text + a macro filter, e.g. min protein) via
-  API query params + SQL. *Verify:* a search test returns the expected subset from seeded
-  data.
+- **T5.2** Browse **search/filter/sort** via `GET /api/recipes` query params + SQL
+  (locked at GATE 0): **title text** search (case-insensitive substring on `title`,
+  optionally `description`); **tag filter** (multi-select, **AND** semantics); a
+  **favorites-only** toggle (`favorite = true`); **macro filters** `minProtein` +
+  `maxCalories` on `macrosPerServing`; and **sort** by newest (`createdAt` desc, default),
+  title A–Z, or highest protein. _(Full-text search over ingredients/steps is deferred to
+  a later phase — needs Postgres FTS.)_ *Verify:* search tests return the expected subset
+  from seeded data for a title query, a tag AND-filter, the favorites toggle, and a
+  `minProtein`/`maxCalories` range, and confirm each sort order.
 
 ## Milestone 6 — Deployment & docs
 - **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime) +
