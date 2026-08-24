@@ -99,9 +99,12 @@ addition, not a migration.
     `schema_version`, `owner_id`, `created_at`, `updated_at`) + the **per-serving macro
     columns** (`cal`, `protein`, `carbs`, `fat`) + `macro_source`.
   - `recipe_ingredients` — **child table**, FK `recipe_id`, an explicit **`position`**
-    integer for ordering, and columns `group` (nullable section label), `name`,
-    `quantity` (nullable), `unit` (nullable), `food_id` (nullable FK → `foods`), `note`
-    (nullable). This is where the nullable-quantity/to-taste rows and grouping live.
+    integer for ordering, and columns `group_label` (nullable section label — the column is
+    named `group_label`, **not** `group`, which is a Postgres reserved word; the JSON field
+    stays `group`), `name`, `quantity` (nullable), `unit` (nullable), `food_id` (nullable
+    UUID; **the FK → `foods.id` is added later in T4.1** when the `foods` table exists — the
+    column is created here in M1 **without** the constraint), `note` (nullable). This is
+    where the nullable-quantity/to-taste rows and grouping live.
   - `recipe_steps` — **child table**, FK `recipe_id`, `position`, `text`. (Ordered; may
     be empty for video-only captions.)
   - `recipe_images` — **child table**, FK `recipe_id`, `position`, `url`.
@@ -114,10 +117,13 @@ addition, not a migration.
 - **Auth-ready schema (no auth implemented this phase):** a `users` table stub and a
   **nullable `owner_id`** FK on `recipes`. Nothing enforces it yet; it exists so auth
   is a later addition, not a schema migration of live data.
-- A **`foods` table** caches Open Food Facts entries the user has picked, keyed by the OFF
-  **barcode `code`** (unique), storing name, per-100 g macros (kcal/protein/carbs/fat),
-  `lang`, and `fetched_at`, so repeat lookups need no network (D5). Recipe ingredients
-  reference it via a nullable `food_id`.
+- A **`foods` table** (created in T4.1, M4) caches Open Food Facts entries the user has
+  picked. It has a **surrogate UUID `id` primary key** (this is what `foodId: uuid?` in the
+  `Recipe` format refers to) with the OFF **barcode `code`** as a **`UNIQUE` column** (not
+  the PK), storing name, per-100 g macros (kcal/protein/carbs/fat), `lang`, and
+  `fetched_at`, so repeat lookups need no network (D5). `recipe_ingredients.food_id`
+  references **`foods.id`**; cache-hit resolution can look up by either `id` or the unique
+  `code`.
 - **Standardised recipe format (`Recipe`)** is defined once as a **JSON Schema in
   `docs/`** (the single source of truth), mirrored by a C++ struct (jsoncpp
   serialization) and a TS type. It is validated at every API boundary, on paste-parser
@@ -130,13 +136,14 @@ addition, not a migration.
 
 ### D3 — Local-LLM integration (pluggable, behind an HTTP-client seam)
 - **HTTP-client seam (B2 — testability):** outbound HTTP does **not** call libcurl
-  directly from `LlmClient`/the OFF client. A tiny **`HttpClient` interface**
-  (`get`/`post` → status + body) has a **libcurl (synchronous) implementation** for
-  production and a **fake/stub implementation** for tests. This is the seam the mocked-HTTP
-  verifications in T3.2, T4.1, and T4.3 depend on — without it, direct libcurl is not
-  mockable. (libcurl sync chosen over Drogon's event-loop-bound `HttpClient` for beginner
-  simplicity; note HTTPS pulls in OpenSSL. Blocking behaviour is covered in D2/M3.)
-- `LlmClient` (built on the `HttpClient` seam) calls a local LLM. Config via env:
+  directly from `LlmClient`/the OFF client. A tiny **`IHttpClient` interface** (named with
+  the `I` prefix to avoid colliding with Drogon's own `HttpClient` class) — `get`/`post` →
+  status + body — has a **libcurl (synchronous) implementation** for production and a
+  **fake/stub implementation** for tests. This is the seam the mocked-HTTP verifications in
+  T3.2, T4.1, and T4.3 depend on — without it, direct libcurl is not mockable. (libcurl
+  sync chosen over Drogon's event-loop-bound `HttpClient` for beginner simplicity; note
+  HTTPS pulls in OpenSSL. Blocking behaviour is covered in D2/M3.)
+- `LlmClient` (built on the `IHttpClient` seam) calls a local LLM. Config via env:
   `LLM_BASE_URL` (server root, default `http://localhost:11434`), `LLM_MODEL` (**no baked
   default — documentation-only; if unset, the LLM engine is unavailable and the toggle is
   disabled, never a silent guess**), optional `LLM_API_KEY`.
@@ -378,8 +385,11 @@ addition, not a migration.
   valijson supports — Q4); SQL migrations for the **relational shape decided in D2/B1**:
   `users` stub; `recipes` (nullable `owner_id`, scalar fields, **per-serving macro columns
   cal/protein/carbs/fat, `total_weight_g`, `macro_source`**); **child tables
-  `recipe_ingredients`** (FK, `position`, nullable `quantity`/`unit`/`group`/`food_id`/`note`,
-  language-neutral unit vocabulary), **`recipe_steps`** (FK, `position`, `text`),
+  `recipe_ingredients`** (FK, `position`, nullable
+  `quantity`/`unit`/`group_label`/`food_id`/`note` — **`food_id` is a plain nullable UUID
+  column here, no FK yet** (the `foods` table lands in T4.1), and the section column is
+  `group_label` not the reserved word `group`; language-neutral unit vocabulary),
+  **`recipe_steps`** (FK, `position`, `text`),
   **`recipe_images`** (FK, `position`, `url`); **join table `recipe_tags`** (`recipe_id`,
   `tag`); C++ model structs + jsoncpp (de)serialization that **assemble/emit the canonical
   `Recipe` JSON from these tables** + a **`valijson` validation function**. *Verify:*
@@ -408,9 +418,12 @@ addition, not a migration.
   where practical).
 - **T2.2** Add/Edit form built with Angular **Reactive Forms** (title, description,
   servings, weight, dynamic ingredient-row `FormArray`, steps, source URL, images, macro
-  fields) → `POST`/`PUT /api/recipes` with **server-side validation** in the backend.
-  *Verify:* a valid submission persists and appears in browse; invalid input is rejected
-  with a message (backend validation unit test + a form-validation component test).
+  fields) → `POST`/`PUT /api/recipes` with **server-side validation** in the backend; plus
+  a **`DELETE /api/recipes/:id`** controller (exposing the T1.3 repository `delete`) wired
+  to a delete action in the UI with a confirm. *Verify:* a valid submission persists and
+  appears in browse; invalid input is rejected with a message; **deleting a recipe removes
+  it from `GET /api/recipes`** (backend validation + delete API test + a form-validation
+  component test).
 - **T2.3** Wire **manual macro entry + override** into the form (self-contained; no
   nutrition DB yet). *Verify:* a recipe saved with manually entered macros persists and
   renders both macro columns; per-100 g shows "—" when no weight is given. _(Auto
@@ -437,7 +450,7 @@ addition, not a migration.
   *Verify:* unit tests parse the three representative captions into the expected structured
   fields, including grouping, null-quantity rows, the extracted macro block, empty steps,
   **correct emoji/umlaut handling (`Eiweiß`, `Hähnchen`) and the `7%`-not-a-quantity case**.
-- **T3.2** `LlmClient` (on the **`HttpClient` seam** from D3/B2) + `LlmParser` (Ollama
+- **T3.2** `LlmClient` (on the **`IHttpClient` seam** from D3/B2) + `LlmParser` (Ollama
   native `/api/chat` `format`=schema by default, OpenAI-compatible fallback; schema
   validation; fallback on invalid). Documented fallback = on invalid/unparseable LLM JSON,
   return a **best-effort or empty draft into the editable preview with a warning** (no
@@ -450,17 +463,19 @@ addition, not a migration.
   rule-based engine produces a pre-filled, editable form that saves correctly.
 
 ## Milestone 4 — Macros from Open Food Facts (search & pick) + LLM estimate
-- **T4.1** `NutritionSource` interface + **OFF client** (on the **`HttpClient` seam**
+- **T4.1** `NutritionSource` interface + **OFF client** (on the **`IHttpClient` seam**
   from D3/B2 → OFF **Search-a-licious `/api/v2/search`** primary, legacy `/cgi/search.pl`
-  fallback; **descriptive `User-Agent`**; 429/backoff) + migration adding the **`foods`
-  cache table (keyed by barcode `code`) + `recipe_ingredients.food_id`** + `GET
-  /api/foods/search?q=` (**local `foods` first, live OFF only when insufficient**, then
+  fallback; **descriptive `User-Agent`**; 429/backoff) + migration creating the **`foods`
+  cache table (surrogate UUID `id` PK, `code` UNIQUE)** and **adding the FK constraint
+  `recipe_ingredients.food_id → foods.id`** onto the column that already exists from T1.2
+  (no new column) + `GET /api/foods/search?q=` (**local `foods` first, live OFF only when
+  insufficient**, then
   persist picked results) + the per-100 g nutrient mapping (`energy-kcal_100g`, else
   `energy_100g ÷ 4.184`; proteins/carbohydrates/fat `_100g`) + a **unit→gram converter with
   the density table AND the M2 piece-weight / spoon-volume table**. **First confirm the
   current OFF rate limits against the live docs (M1)** — do not hard-code the old
   "~100/min" figure — and size backoff conservatively. *Verify:* unit test with the **fake
-  `HttpClient`** returns candidates; **resolving an already-picked food (by
+  `IHttpClient`** returns candidates; **resolving an already-picked food (by
   `food_id`/barcode) makes no API call** (cache hit); a **kJ-only mock** is converted (or
   rejected), never summed raw; unit-conversion tests (g/kg/ml/l + **piece units like
   `Knoblauchzehen`/`Zwiebel` and spoons `TL`/`EL`**) incl. the "no table entry, no density
@@ -481,9 +496,10 @@ addition, not a migration.
   macros, and per-serving + per-100 g compute correctly when all ingredients are picked
   and gram-resolved (backend compute unit test + a form component test for the pick flow).
 - **T4.3** `POST /api/macros/estimate` + "Estimate with local LLM" button →
-  `LlmMacroEstimator` (schema-validated; also returns estimated total weight), fills macro
-  fields for user review. *Verify:* unit test with a mocked LLM fills macro fields; the
-  user can still override before save.
+  `LlmMacroEstimator` (reuses `LlmClient` on the **`IHttpClient` seam**; schema-validated;
+  also returns estimated total weight), fills macro fields for user review. *Verify:* unit
+  test with the **fake `IHttpClient`** (no live LLM) fills macro fields; the user can still
+  override before save.
 
 ## Milestone 5 — Media, polish, search
 - **T5.1** Image upload endpoint (Drogon multipart → disk volume) + external-URL option
@@ -535,6 +551,25 @@ _Stack is settled: Angular SPA + C++/Drogon backend + PostgreSQL._
 
 ## Reviewer notes
 _(newest round first)_
+
+**Round 7** (fresh full re-read after the Round 6 fold-in): reviewer **confirmed all B1–B3
+and M1–M6 / Q1–Q10 fixes present and sound**, but found **1 blocking + 5 non-blocking** —
+mostly exposed by the new relational schema. All addressed:
+- _BLOCKING: `food_id` column vs. `foods` FK sequencing (T1.2 creates it, T4.1 also
+  "adds" it; FK target absent in M1)_ → *Fixed*: T1.2 creates `food_id` as a plain nullable
+  UUID column (no FK); T4.1 creates `foods` (surrogate UUID `id` PK, `code` UNIQUE) and
+  **adds the FK constraint** onto the existing column (no duplicate column). D2 updated.
+- _NB `foods` key vs. `foodId: uuid?` mismatch_ → *Fixed*: `foods.id` is a surrogate UUID
+  PK (= `foodId`), `code` is a UNIQUE column, `recipe_ingredients.food_id → foods.id`.
+- _NB `group` is a Postgres reserved word_ → *Fixed*: column renamed `group_label`; JSON
+  field stays `group`.
+- _NB seam name `HttpClient` collides with Drogon's class_ → *Fixed*: renamed the seam
+  **`IHttpClient`** everywhere (D3, T3.2, T4.1, T4.3).
+- _NB T4.3 verify didn't name the fake seam_ → *Fixed*: T4.3 reuses `LlmClient` on the
+  `IHttpClient` seam and verifies with the fake.
+- _NB no `DELETE` endpoint despite a repository `delete`_ → *Fixed*: added
+  `DELETE /api/recipes/:id` (+ UI confirm + test) to T2.2.
+Awaiting a confirm pass, then the human signature.
 
 **Round 6** (deep external review — two independent passes, one blind cross-check;
 `PLAN_REVIEW_recipe_app_foundation.md`): **CHANGES REQUIRED** — the workflow reviewer
