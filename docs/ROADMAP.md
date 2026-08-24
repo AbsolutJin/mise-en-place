@@ -28,6 +28,8 @@ Legend for the pills below: 🟢 done · 🟡 in progress · ⚪ not started.
 ## Milestone 1 — Backend scaffold, schema, DB, browse API ⚪
 
 - [ ] **T1.1 — Toolchain + Drogon skeleton + migration runner**
+  - **Dev env: WSL2 (Ubuntu)** — set up the toolchain inside WSL (matches the Linux/Docker
+    deploy target); keep the repo in the WSL filesystem (`~/dev/...`), not `/mnt/e/...`
   - Build: CMake + `vcpkg.json` (`drogon[postgres]`, `valijson`, `libcurl`, `re2`, Catch2)
   - `/health` endpoint; Postgres connection from env; `setThreadNum` sized
   - Migration runner: version-tracking, per-migration transaction, session `pg_advisory_lock` on one dedicated connection
