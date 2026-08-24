@@ -62,14 +62,18 @@ addition, not a migration.
   - **Status codes:** `400` malformed request; `422` schema-invalid `Recipe`/macro body
     (valijson failure, with failing paths in `details`); `404` unknown `:id`; `502` when a
     required upstream (OFF/LLM) is unreachable and no cached result exists; `504` upstream
-    timeout; OFF **`429` is surfaced as `429`** (not masked). D6's "graceful degradation"
-    uses this envelope — e.g. `/api/foods/search` returns `200` with cached-only results +
-    a `warning`, or `502` only when nothing is cached.
+    timeout; OFF **`429` is surfaced as `429`** (not masked) — **except** when a partial
+    cache can answer, which takes precedence: `/api/foods/search` under OFF throttling
+    returns **`200` with cached-only results + a `warning`** if any local candidates exist,
+    and surfaces `429` (or `502` when nothing is cached) only when it cannot. Mutations use
+    the same envelope: **`PUT`/`DELETE` target `/api/recipes/:id`** (so the `404`-on-`:id`
+    rule applies), and a successful **`DELETE` returns `204`**.
   - **List vs detail + pagination:** `GET /api/recipes` returns a **lightweight summary
-    projection** (id, title, first image, `favorite`, per-serving macros, tags) — **not**
-    full child-assembled objects — and is **paginated** via `?limit=&offset=` (a sane default
-    cap, e.g. 50). Full canonical `Recipe` (all child tables assembled) is only
-    `GET /api/recipes/:id`. This bounds the browse query as the store grows.
+    projection** (id, title, first image, `favorite`, per-serving macros + **`macrosEstimated`
+    so the list can flag estimated macros too**, tags) — **not** full child-assembled
+    objects — and is **paginated** via `?limit=&offset=` (a sane default cap, e.g. 50). Full
+    canonical `Recipe` (all child tables assembled) is only `GET /api/recipes/:id`. This
+    bounds the browse query as the store grows.
 - **Trade-off accepted:** two build systems and two deploys; the `Recipe` type is
   **not auto-shared** across C++/TS — three representations (JSON Schema, C++ struct, TS
   type) are kept in sync **by hand** this phase, a known drift risk (Q9). Mitigated by D2
@@ -102,21 +106,27 @@ addition, not a migration.
   "schema-validated" step (T1.2, T3.2, T4.3).
 - **Migrations:** plain **SQL files** in `/backend/migrations`, applied by a small
   **version-tracking runner** on startup that records applied versions in a
-  `schema_migrations` table. Each migration runs **inside a transaction** and its version
-  is recorded **only on success** (so a failed migration doesn't half-apply). **Concurrent-
-  boot safety (Q7 + 2nd-review Major 3):** the runner must hold its lock and do its work on
-  **one physical connection** — a session-level `pg_advisory_lock` from Drogon's *pooled*
-  `DbClient` can land the lock, the migrations, and the unlock on **different** pooled
-  connections and so fail to serialize. So the runner uses a **dedicated single connection**
-  (not the shared pool) and **`pg_advisory_xact_lock` inside one wrapping transaction**, or
-  equivalently holds a session advisory lock on that one dedicated connection for the whole
-  run. ("Idempotent" = safe to re-run the runner via version-tracking; the DDL itself is not
-  required to be idempotent.) No ORM code-gen magic — easy to read while learning.
+  `schema_migrations` table. Each migration runs **inside its own transaction** and its
+  version is recorded **only on success** (a failure rolls back just that migration, not the
+  ones already committed). **Concurrent-boot safety (Q7 + 2nd-review Major 3):** the runner
+  must hold its lock and do all its work on **one dedicated physical connection** (not the
+  shared pool) — a `pg_advisory_lock` from Drogon's *pooled* `DbClient` can land the lock,
+  the migrations, and the unlock on **different** pooled connections and so fail to
+  serialize. Concretely: acquire a **session-level `pg_advisory_lock` on that one dedicated
+  connection, held across all the per-migration transactions**, then release it at the end.
+  (A single wrapping transaction is *not* used — that would give all-or-nothing rollback
+  across every migration, a different granularity; and a per-migration `pg_advisory_xact_lock`
+  is avoided because it releases at each migration's commit, reopening the race between
+  migrations.) The **"already applied?" check reads `schema_migrations` while the lock is
+  held**, so two booting instances serialize. ("Idempotent" = safe to re-run the runner via
+  version-tracking; the DDL itself is not required to be idempotent.) No ORM code-gen magic.
 - **Relational storage shape (B1 — decided, not JSONB blobs):**
   - `recipes` — one row per recipe: scalar fields (`title`, `description`, `source_url`,
     `servings`, `prep_time_min`, `cook_time_min`, `total_weight_g`, `favorite`, `notes`,
     `schema_version`, `owner_id`, `created_at`, `updated_at`) + the **per-serving macro
-    columns** (`cal`, `protein`, `carbs`, `fat`) + `macro_source`.
+    columns** (`cal`, `protein`, `carbs`, `fat`) + `macro_source` + **`macros_estimated`
+    boolean** (persists the `macrosEstimated` flag so the "estimated" marker survives a
+    save→reload — it is a **stored** field, not derived like per-100 g).
   - `recipe_ingredients` — **child table**, FK `recipe_id`, an explicit **`position`**
     integer for ordering, and columns `group_label` (nullable section label — the column is
     named `group_label`, **not** `group`, which is a Postgres reserved word; the JSON field
@@ -415,18 +425,19 @@ addition, not a migration.
   framework — Catch2**; jsoncpp comes vendored with Drogon) + Drogon skeleton; `/health`
   endpoint; Postgres connection from env; **`setThreadNum`** sized (D2/M3); a
   **version-tracking migration runner** with a `schema_migrations` table that wraps each
-  migration in a **transaction** (version recorded only on success) and, on a **dedicated
-  single connection** (not the shared pool), takes **`pg_advisory_xact_lock`** so concurrent
-  boots serialize (Q7 + 2nd-review Major 3); `docker-compose` with a postgres service for
-  dev. *Verify:* `cmake --build` succeeds (first build pulls Drogon's deps, slow); app
-  boots; `GET /health` returns 200; logs show a successful Postgres connection; re-running
-  the app does not re-apply migrations; a deliberately failing migration leaves
-  `schema_migrations` unchanged (transaction rollback).
+  migration in its **own transaction** (version recorded only on success) and, on a
+  **dedicated single connection** (not the shared pool), holds a **session-level
+  `pg_advisory_lock` across all the per-migration transactions** (releasing at the end) so
+  concurrent boots serialize (Q7 + 2nd-review Major 3, per D2); `docker-compose` with a
+  postgres service for dev. *Verify:* `cmake --build` succeeds (first build pulls Drogon's
+  deps, slow); app boots; `GET /health` returns 200; logs show a successful Postgres
+  connection; re-running the app does not re-apply migrations; a deliberately failing
+  migration leaves `schema_migrations` unchanged (that migration's transaction rolls back).
 - **T1.2** `Recipe` JSON Schema in `docs/` (source of truth — the **locked field list**
   above; authored to **JSON Schema Draft 7** with the matching `"$schema"`, the draft
   valijson supports — Q4); SQL migrations for the **relational shape decided in D2/B1**:
   `users` stub; `recipes` (nullable `owner_id`, scalar fields, **per-serving macro columns
-  cal/protein/carbs/fat, `total_weight_g`, `macro_source`**); **child tables
+  cal/protein/carbs/fat, `total_weight_g`, `macro_source`, `macros_estimated`**); **child tables
   `recipe_ingredients`** (FK, `position`, nullable
   `quantity`/`unit`/`group_label`/`food_id`/`note` — **`food_id` is a plain nullable UUID
   column here, no FK yet** (the `foods` table lands in T4.1), and the section column is
@@ -439,8 +450,9 @@ addition, not a migration.
   **`valijson` validation function**. *Verify:* migrations apply on a fresh DB; unit test
   round-trips a `Recipe` struct↔JSON (via the child tables) — including a **grouped,
   to-taste-ingredient recipe** (null quantity/unit), ordered `steps`, an **empty-`steps`**
-  recipe, **and `tags[]` + `images[]` with order preserved** — and `valijson` **rejects a
-  schema-invalid document** and accepts a valid one.
+  recipe, **`tags[]` + `images[]` with order preserved**, **and `macrosEstimated: true`
+  surviving the round-trip** — and `valijson` **rejects a schema-invalid document** and
+  accepts a valid one.
 - **T1.3** Recipe repository/service (create, read, list, update, delete) via Drogon
   `DbClient` (`execSqlSync`) — writing/reading across the parent + child tables in a
   transaction; per-100 g derived computation. **Update (PUT) strategy (2nd-review blocker):
@@ -618,6 +630,26 @@ _Stack is settled: Angular SPA + C++/Drogon backend + PostgreSQL._
 
 ## Reviewer notes
 _(newest round first)_
+
+**Round 9** (workflow reviewer over the 2nd-external-review fold-in, aimed at
+implementability depth + fact-checking): confirmed all the folded fixes present and
+consistent, but found **1 blocking + 4 non-blocking**. All addressed:
+- _BLOCKING: `macrosEstimated` had no storage column — the Major-1 honesty flag couldn't
+  survive save→reload (present in the format, T4.2 compute, and T2.1 display, but not in the
+  `recipes` columns)_ → *Fixed*: added a stored **`macros_estimated` boolean** column
+  (D2/B1 + T1.2), included it in the assembly + the T1.2 round-trip test, and added
+  `macrosEstimated` to the D1 summary projection so the browse list flags it too.
+- _NB migration-lock phrasing described two non-equivalent mechanisms_ → *Fixed*: D2 + T1.1
+  now pin one — a **session `pg_advisory_lock` on a dedicated connection held across the
+  per-migration transactions**, with the applied-version check read under the lock (dropped
+  the "wrapping transaction / `pg_advisory_xact_lock`" conflation).
+- _NB `429` vs partial-cache precedence unpinned_ → *Fixed*: D1 states cached `200`+warning
+  takes precedence over surfacing `429` when local candidates exist.
+- _NB REST surface details_ → *Fixed*: D1 pins `PUT`/`DELETE` target `/api/recipes/:id` and
+  `DELETE` → `204`.
+- _NB `macroSource` single enum lossy for mixed provenance_ → accepted as a documented trade
+  (precedence rule + future `schemaVersion`); no change.
+Awaiting a confirm pass.
 
 **2nd external review** (`docs/reviews/PLAN_REVIEW_2026-08-24_external-2.md`, two independent
 passes, over the Round-8 plan): **CHANGES REQUIRED** — it confirmed the Round 7 fixes are
