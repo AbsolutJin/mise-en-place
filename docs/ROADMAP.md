@@ -20,7 +20,7 @@ at Milestone 0 / T0.1.**
 
 ---
 
-## Phase 0 — Planning ⏳ (GATE 0 pending)
+## Phase 0 — Planning ✅ (GATE 0 passed 2026-08-24)
 
 - [x] Understand — intent + repo context
 - [x] Plan written — `docs/plans/PLAN_recipe_app_foundation.md`
