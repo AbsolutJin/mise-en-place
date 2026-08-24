@@ -2,8 +2,8 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: pending      # REOPENED 2026-08-24 — human chose to drop Drogon/framework and build the backend "from sockets up" (own HTTP server/router/JSON/schema/DB-over-libpq/HTTP-client). Material D1–D3 + milestone change; was approved (reviewer+human 2026-08-24), now re-planning + re-review.
-  human: pending      # was 2026-08-24; reset on the from-scratch pivot
+  reviewer: 2026-08-24   # re-APPROVED after the from-scratch pivot (pivot review R1 → confirm APPROVE, T0.8 added). Human signature is the only remaining GATE 0 step.
+  human: pending      # was 2026-08-24; reset on the from-scratch pivot, awaiting re-signature
 ---
 
 # Plan — mise-en-place recipe app (foundation)
@@ -779,7 +779,13 @@ all addressed:
 - _NB no server idle timeout (slowloris); body cap not enforced on chunked decode_ → *Fixed*:
   T0.2 adds a read/idle timeout + chunked-body cap.
 Reviewer confirmed the other from-scratch claims sound and that previously-approved content
-survived intact. Awaiting a confirm pass, then human signature.
+survived intact.
+
+**Pivot review R2** (diff-only confirm on the R1 fixes): **APPROVE** — T0.8 `httpclient` is a
+real M0 task referenced consistently (T3.2/T4.1/T6.1 `ca-certificates`); multipart→T5.1; own
+validator in the `422` line; T0.6 standalone connect; T0.2 timeout + chunked cap. M0→M1 chain
+sound, no new inconsistency. Reviewer signature re-stamped `2026-08-24`; **human GATE 0
+signature is the only remaining step.**
 
 **Round 12** (diff-only confirm on the 3rd-review fold-in): **APPROVE** — `macrosEstimated`
 verified consistent across format/D5/T4.2/T4.3/T2.1/D1; `definitions/Macros`, file-GC
