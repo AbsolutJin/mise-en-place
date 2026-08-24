@@ -51,6 +51,13 @@ Legend for the pills below: 🟢 done · 🟡 in progress · ⚪ not started.
 
 ## Milestone 2 — Frontend scaffold, browse/detail, structured form ⚪
 
+- [ ] **T2.0 — UI mockups (design before build)**
+  - Mock the key screens in `docs/mockups/` (see its README): browse/list + search bar,
+    recipe detail (macro tables, `—`/estimated states, `macroSource` badge), add/edit form
+    (dynamic ingredient rows), paste import (editable preview), OFF search-and-pick, and
+    the empty/error/warning states
+  - **Done when:** each screen in the mockups checklist has an agreed mock and the layout/
+    controls are settled — so T2.1–T2.3 build against a decided design, not ad-hoc
 - [ ] **T2.1 — Angular scaffold + browse/detail**
   - Exact-pinned Angular; dev `proxy.conf.json`; typed API service coding against the error envelope; browse list (paginated summaries) + detail (macros, `macrosEstimated` marker on list & detail, `macroSource` badge)
   - **Done when:** `ng build` passes; `ng test` green (ChromeHeadlessNoSandbox); list + a detail render a seeded recipe with both macro columns
