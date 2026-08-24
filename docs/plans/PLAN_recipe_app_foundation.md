@@ -1,9 +1,9 @@
 ---
 plan: recipe_app_foundation
-status: draft
+status: approved
 approvals:
-  reviewer: 2026-08-24   # re-APPROVED after folding the 5th external review (M0 security pass — TLS hostname verify, sanitizers/fuzzing, digest pin, HTTP anti-smuggling, ROADMAP rewrite). Human signature is the only remaining GATE 0 step.
-  human: pending      # was 2026-08-24; reset on the from-scratch pivot, awaiting re-signature
+  reviewer: 2026-08-24   # APPROVED after 5 external reviews + from-scratch pivot + vcpkg drop.
+  human: 2026-08-24    # GATE 0 human approval — auth-ready-no-auth; SEVEN milestones (M0+M1-M6); D1 FROZEN (no more stack pivots); TLS stays hand-rolled over OpenSSL + the S1 hostname-verify fix; TLS/basic-auth caveat accepted.
 ---
 
 # Plan — mise-en-place recipe app (foundation)
@@ -842,12 +842,14 @@ no-translation (D3); milestone order (deploy stays M6); **per-100 g gap (M2) →
 piece-weight/spoon-volume table so it resolves for real recipes**. Remaining sign-off
 questions:_
 1. **Auth seam default:** OK to include the auth-ready schema (users stub + nullable
-   `owner_id`) now with **no auth implemented**, per D2/D6?
+   `owner_id`) now with **no auth implemented**, per D2/D6? **→ APPROVED 2026-08-24: yes.**
 2. **Scope:** all **SEVEN milestones (M0 core libraries + M1–M6)** this phase? _(5th-review
-   P2: M0 — the from-scratch HTTP server/JSON/validator/DB/HTTP-client — is the biggest,
-   riskiest piece; the sign-off must count it, not the old "six".)_
-3. **Freeze D1?** _(5th-review P4)_ Confirm the stack is now **final** — no further pivots
-   (framework, package manager, from-scratch scope) — so "ready to implement" stops resetting.
+   P2.)_ **→ APPROVED 2026-08-24: yes, all seven.**
+3. **Freeze D1?** _(5th-review P4.)_ **→ APPROVED 2026-08-24: yes, D1 is FROZEN** — no further
+   framework / package-manager / from-scratch-scope pivots. The **TLS client stays hand-rolled
+   over OpenSSL** (with the T0.8 S1 hostname-verify fix); the `IHttpClient` seam keeps a
+   library swap cheap if ever needed.
+_All three sign-off questions are ANSWERED; GATE 0 is CLOSED (`status: approved`)._
 
 _Stack: Angular SPA + **from-scratch C++ backend (no framework — own HTTP server/router/JSON/
 schema/DB-over-libpq/HTTP-client; externals = libpq, OpenSSL, Catch2)** + PostgreSQL._

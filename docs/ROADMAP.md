@@ -8,16 +8,15 @@ step is done and verified.
 A task is **done** only when its code is written, its **"Done when"** check passes, and the
 change is committed. Milestones close after a `workflow:review` at the boundary.
 
-**Status (2026-08-24):** ⏳ **Planning — GATE 0 NOT yet passed.** The plan is
-**reviewer-approved** (`approvals.reviewer: 2026-08-24`) but the **human signature is pending**
-(`approvals.human: pending`, `status: draft`). Five external reviews + the internal reviewer
-have been folded in; the backend was pivoted to **from-scratch (no framework, no vcpkg)**.
-**No implementation has started.**
+**Status (2026-08-24):** ✅ **GATE 0 PASSED** — plan **approved** (`approvals.reviewer` +
+`approvals.human` both `2026-08-24`, `status: approved`). Human decisions: auth-ready-no-auth;
+**seven milestones**; **D1 frozen** (no more stack pivots); TLS stays hand-rolled + the S1
+fix. Five external reviews + the internal reviewer folded in. **Ready to start implementation
+at Milestone 0 / T0.1.**
 
-> ⚠️ Do not begin coding until the human signs GATE 0. The stack is: **from-scratch C++
-> backend** (own HTTP server/router/JSON/schema/DB-over-libpq/HTTP-client), Angular SPA,
-> PostgreSQL; externals via **system apt** (libpq, OpenSSL, utf8proc, Catch2 — **no vcpkg**);
-> dev in **WSL2**.
+> Stack (FROZEN): **from-scratch C++ backend** (own HTTP server/router/JSON/schema/
+> DB-over-libpq/HTTP-client), Angular SPA, PostgreSQL; externals via **system apt** (libpq,
+> OpenSSL, utf8proc, Catch2 — **no vcpkg**); dev in **WSL2**.
 
 ---
 
@@ -29,8 +28,8 @@ have been folded in; the backend was pivoted to **from-scratch (no framework, no
 - [x] **Five external reviews** folded in (`docs/reviews/`) — incl. the from-scratch pivot,
       the vcpkg drop, and the M0-security pass
 - [x] Reviewer approval (`approvals.reviewer: 2026-08-24`)
-- [ ] **Human GATE 0 signature** — auth-ready-no-auth · seven milestones (M0+M1–M6) · TLS
-      caveat · **freeze D1** _(← the only remaining planning step)_
+- [x] **Human GATE 0 signature** (`approvals.human: 2026-08-24`) — auth-ready-no-auth · seven
+      milestones · D1 frozen · TLS hand-rolled + S1 fix · TLS/basic-auth caveat accepted
 
 ---
 
