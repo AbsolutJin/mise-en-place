@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: pending      # REOPENED again 2026-08-24 — human chose to drop vcpkg too, using system packages (apt) for libpq/OpenSSL/Catch2. Build-system change; re-review.
+  reviewer: 2026-08-24   # re-APPROVED after from-scratch pivot + vcpkg-drop (both reviewed to APPROVE). Human signature is the only remaining GATE 0 step.
   human: pending      # was 2026-08-24; reset on the from-scratch pivot, awaiting re-signature
 ---
 
@@ -736,8 +736,10 @@ addition, not a migration.
   works against a persisted Postgres volume; `/api/*` and `/uploads/*` are reachable through
   nginx; **an OFF search from inside the running backend container succeeds (CA trust works)**.
 - **T6.2** `docs/` usage + config (env vars, pointing at Ollama, Postgres backup, C++
-  build notes **incl. the exact `apt install` package list** and the pinned base-image tag,
-  Angular build notes, **and the minimum build RAM** — Q8). **Verify the exact Ollama pull tag** for the documented `LLM_MODEL`
+  build notes **incl. the exact `apt install` package list — using the pinned base image's
+  real, version-specific package names** (e.g. `libssl3`, the release's Catch2 package), not
+  the generic placeholders — and the pinned base-image tag, Angular build notes, **and the
+  minimum build RAM** — Q8). **Verify the exact Ollama pull tag** for the documented `LLM_MODEL`
   (`ollama list`) and put a resolvable tag in `.env.example`. *Verify:* a **concrete
   copy-pasteable sequence** from the docs succeeds: `docker compose up` → `curl /health`
   returns 200 → `POST` a sample recipe → it appears in `GET /api/recipes`.
@@ -769,7 +771,11 @@ base-image/distro versions + a documented apt list), D2 (dependencies-via-apt no
 from source), T0.1 (CMake finds apt packages), T6.1 (pinned base image + `apt install` in the
 build stage + runtime libs `libpq5`/`libssl` and `ca-certificates`), T6.2 (document the apt
 list + base tag). **Knowing trade recorded:** loses vcpkg's checked-in version pinning; the
-human accepted this. Awaiting a reviewer confirm pass, then the human signature.
+human accepted this. **Reviewer confirm: APPROVE** — no active-body vcpkg references remain,
+reproducibility (pinned base image + apt list) coherent, runtime image ships `libpq5`/`libssl`/
+`ca-certificates`; 1 non-blocking (use the base image's real version-specific apt names in T6.2)
+folded into T6.2. Reviewer signature re-stamped `2026-08-24`; **human GATE 0 signature is the
+only remaining step.**
 
 **From-scratch pivot (2026-08-24)** — after GATE 0 was passed, the human chose to **drop the
 Drogon framework and build the backend from sockets up** (own HTTP server/router/JSON/schema/
