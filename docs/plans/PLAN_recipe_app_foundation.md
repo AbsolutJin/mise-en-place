@@ -103,12 +103,17 @@ built **auth-ready** so auth is a later addition, not a migration.
   no LLM running.
 
 ### D4 — Paste parsing: two engines behind one interface
+- **Scope this phase: social captions only** — TikTok / Instagram free-text captions
+  (the three fixtures). **Out of scope:** pasted recipe-website text and URL/HTML
+  fetching (schema.org/`Recipe` JSON-LD). Those are a clean later addition behind the
+  same `RecipeParser` interface and are **not** built now.
 - `RecipeParser` interface with two C++ implementations:
-  - `RuleBasedParser`: heuristics (line splitting, quantity/unit regex,
-    "Ingredients"/"Instructions" section detection, hashtag/emoji stripping). Offline,
-    free, deterministic.
-  - `LlmParser`: sends pasted text + the `Recipe` JSON Schema to the local LLM, asks
-    for schema-valid JSON, validates it.
+  - `RuleBasedParser` — **the best-effort primary engine**: the everyday workhorse that
+    fully handles the pinned caption patterns (sections→`group`, quantity/unit regex,
+    macro block, to-taste rows, parenthetical→note, hashtag/emoji stripping). Offline,
+    free, deterministic; the app is fully usable with no LLM running.
+  - `LlmParser` — **the fallback** for messy captions the rules miss: sends pasted text
+    + the `Recipe` JSON Schema to the local LLM, asks for schema-valid JSON, validates it.
 - **UI:** on the paste screen the user picks the engine, sees the parsed result in an
   **editable preview form** (reuses the M2 form), corrects anything, then saves.
   Parsing never saves directly — the human always confirms.
@@ -282,6 +287,8 @@ built **auth-ready** so auth is a later addition, not a migration.
 
 ## Milestone 3 — Paste import with selectable engine
 - **T3.1** `RecipeParser` interface + `RuleBasedParser` in C++ + `POST /api/parse`.
+  Scope is **social captions only** (TikTok/Instagram); the rule-based engine is the
+  **best-effort primary** parser (LLM is the fallback in T3.2).
   Concrete patterns to handle (from the worked German + English caption examples):
   **ingredient sections** (`🍗 Für das Hähnchen:` / `Crispy Beef Strips` → each row's
   `group`); **quantity/unit regex** over the language-neutral vocabulary (`600 g`,
