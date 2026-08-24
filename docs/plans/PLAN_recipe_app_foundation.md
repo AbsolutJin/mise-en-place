@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: 2026-08-24   # re-APPROVED (Round 10 confirm) after folding in the 2nd external review; rolled back twice mid-session, see Reviewer notes
+  reviewer: pending      # 3rd external review = APPROVE-with-findings (0 blocking, 1 major, 8 minor); folding in then re-confirming before human sign-off
   human: pending      # date (YYYY-MM-DD) on human approval
 ---
 
@@ -59,21 +59,27 @@ addition, not a migration.
   - **Error envelope:** every non-2xx response is one JSON shape —
     `{ "error": { "code": "<machine_slug>", "message": "<human text>", "details": <any?> } }`
     — so the typed frontend service (T2.1) has one thing to code against.
+  - **Warning envelope (success path — 3rd-review minor #1):** a `200` that carries a soft
+    warning uses **one shape** — `{ "data": <payload>, "warning": { "code": "<slug>",
+    "message": "<text>" } }` — for all three degradation flows (`/api/foods/search`
+    cached-only; the parse LLM-invalid draft, T3.2; the LLM-macro fallback, T4.3). Absent
+    `warning` ⇒ a clean result.
   - **Status codes:** `400` malformed request; `422` schema-invalid `Recipe`/macro body
-    (valijson failure, with failing paths in `details`); `404` unknown `:id`; `502` when a
-    required upstream (OFF/LLM) is unreachable and no cached result exists; `504` upstream
-    timeout; OFF **`429` is surfaced as `429`** (not masked) — **except** when a partial
-    cache can answer, which takes precedence: `/api/foods/search` under OFF throttling
-    returns **`200` with cached-only results + a `warning`** if any local candidates exist,
-    and surfaces `429` (or `502` when nothing is cached) only when it cannot. Mutations use
-    the same envelope: **`PUT`/`DELETE` target `/api/recipes/:id`** (so the `404`-on-`:id`
-    rule applies), and a successful **`DELETE` returns `204`**.
+    (valijson failure, with failing paths in `details`); `404` unknown `:id`; `504` upstream
+    timeout. **OFF-throttling behaviour for `/api/foods/search` (3rd-review minor #2):** if
+    any **local candidate** exists → `200` + cached results + `warning`; otherwise propagate
+    the upstream condition — OFF returned `429` → **`429`**; OFF unreachable → **`502`**;
+    OFF timeout → **`504`**. Mutations use the error envelope: **`PUT`/`DELETE` target
+    `/api/recipes/:id`** (so the `404`-on-`:id` rule applies), and a successful **`DELETE`
+    returns `204`**.
   - **List vs detail + pagination:** `GET /api/recipes` returns a **lightweight summary
     projection** (id, title, first image, `favorite`, per-serving macros + **`macrosEstimated`
     so the list can flag estimated macros too**, tags) — **not** full child-assembled
-    objects — and is **paginated** via `?limit=&offset=` (a sane default cap, e.g. 50). Full
-    canonical `Recipe` (all child tables assembled) is only `GET /api/recipes/:id`. This
-    bounds the browse query as the store grows.
+    objects — and is **paginated** via `?limit=&offset=`; **`limit` defaults to 50 and is
+    clamped to a hard server-side maximum (e.g. 100)** so a large client `limit` cannot
+    defeat the bound (3rd-review minor #5). Full canonical `Recipe` (all child tables
+    assembled) is only `GET /api/recipes/:id`. This bounds the browse query as the store
+    grows.
 - **Trade-off accepted:** two build systems and two deploys; the `Recipe` type is
   **not auto-shared** across C++/TS — three representations (JSON Schema, C++ struct, TS
   type) are kept in sync **by hand** this phase, a known drift risk (Q9). Mitigated by D2
@@ -305,7 +311,11 @@ addition, not a migration.
   avoid presenting guessed numbers as exact, the recipe carries **`macrosEstimated: true`**
   whenever any piece/spoon-table (or serving_size-derived) weight fed the math, and the **UI
   marks those macros "estimated"**. This restores the honesty the strict "—" used to give,
-  without going dark for real recipes.
+  without going dark for real recipes. **The same flag is set on the LLM-estimate path (T4.3
+  + 3rd-review Major):** LLM-estimated macros and total weight are approximate by nature, so
+  `macrosEstimated: true` and the UI marks them estimated after save/reload, not only during
+  entry — plus a `macroSource` badge (ingredients/llm/manual) so provenance survives reload
+  regardless.
 - **LLM-estimate button:** asks the local LLM for per-portion macros (and an estimated
   total weight) when the DB lookup is incomplete or the user prefers it.
 - **Manual:** the user can always type/override macros.
@@ -401,14 +411,20 @@ addition, not a migration.
   // macrosPer100g is DERIVED: perServing × servings ÷ totalWeightG × 100 (null if no weight)
   "macroSource": "ingredients | llm | manual",
                                     // PRIMARY provenance. Precedence: any manual edit to a
-                                    //   macro or to totalWeightG flips this to "manual"
-                                    //   (captures the "computed then hand-overridden" case
-                                    //   the single enum otherwise can't; finer per-field
-                                    //   provenance is a future schemaVersion bump).
-  "macrosEstimated": false,         // TRUE when approximate piece/spoon weights (the M2
-                                    //   table) fed the macro/weight math, so both
-                                    //   macrosPerServing and per-100 g are approximate and
-                                    //   the UI marks them "estimated" — not shown as exact.
+                                    //   macro or to totalWeightG flips this to "manual" AND
+                                    //   clears macrosEstimated to false (the user asserts the
+                                    //   edited values); a later recompute re-derives both.
+                                    //   Shown as a badge in the UI (T2.1) so provenance
+                                    //   survives reload. Finer per-field provenance is a
+                                    //   future schemaVersion bump.
+  "macrosEstimated": false,         // TRUE whenever the macros do NOT rest on exact
+                                    //   per-100 g × gram-resolved-weight math — i.e. any of:
+                                    //   an approximate piece/spoon-table (or serving_size)
+                                    //   weight fed the math (M2), OR the macros came from the
+                                    //   LLM estimator (T4.3). FALSE only for all-exact-grams
+                                    //   ingredient computation and for manual entry the user
+                                    //   asserts as exact. The UI marks estimated macros
+                                    //   accordingly rather than showing them as exact.
   "createdAt": "iso", "updatedAt": "iso"
 }
 ```
@@ -435,7 +451,13 @@ addition, not a migration.
   migration leaves `schema_migrations` unchanged (that migration's transaction rolls back).
 - **T1.2** `Recipe` JSON Schema in `docs/` (source of truth — the **locked field list**
   above; authored to **JSON Schema Draft 7** with the matching `"$schema"`, the draft
-  valijson supports — Q4); SQL migrations for the **relational shape decided in D2/B1**:
+  valijson supports — Q4). **Also author the macro body as a named sub-schema `$defs/Macros`**
+  inside the same document (the `{calories,protein,carbs,fat}` shape), referenced by
+  `macrosPerServing`; `POST /api/macros/compute` and `POST /api/macros/estimate` validate
+  their request/response macro bodies against `$defs/Macros`, and the Ollama `format` for the
+  macro estimator (D3) uses the same sub-schema — so the D1 `422` path and every
+  "schema-validated **macro** body" step has one authored schema, not a second source of
+  truth (3rd-review minor #3). SQL migrations for the **relational shape decided in D2/B1**:
   `users` stub; `recipes` (nullable `owner_id`, scalar fields, **per-serving macro columns
   cal/protein/carbs/fat, `total_weight_g`, `macro_source`, `macros_estimated`**); **child tables
   `recipe_ingredients`** (FK, `position`, nullable
@@ -460,11 +482,18 @@ addition, not a migration.
   form already holds every ingredient's `foodId`, so it round-trips them), and the service
   replaces the child rows from that payload, reassigning `position` from array order; **a
   picked `food_id` survives an edit** because the payload carries it (a bare
-  delete-and-reinsert that dropped `food_id` is explicitly rejected). *Verify:* integration
-  tests run against a **dedicated test Postgres** (compose service; migrations applied
-  before the suite; **each test truncates the recipe tables** for determinism — Q1) for CRUD
-  incl. a multi-group/multi-step recipe, **a PUT edit that preserves `food_id` picks and
-  reorders ingredients**, plus a unit test for per-100 g (incl. the "no weight" → null path).
+  delete-and-reinsert that dropped `food_id` is explicitly rejected). **On PUT the backend
+  recomputes `macrosEstimated` from the payload's ingredient/weight resolution** rather than
+  trusting the client-sent flag (3rd-review minor #7). **Image-file GC (3rd-review minor #6):**
+  because `ON DELETE CASCADE` removes `recipe_images` rows, the service **reads the owned
+  image filenames first**, then deletes the recipe, then unlinks the backend-owned files
+  (best-effort, logged on failure — an orphaned file is a warning, never a failed request);
+  on PUT it diffs old vs. new image URLs and unlinks the dropped **owned** files after commit
+  (external-URL images are store-only — never touched). *Verify:* integration tests run
+  against a **dedicated test Postgres** (compose service; migrations applied before the
+  suite; **each test truncates the recipe tables** for determinism — Q1) for CRUD incl. a
+  multi-group/multi-step recipe, **a PUT edit that preserves `food_id` picks and reorders
+  ingredients**, plus a unit test for per-100 g (incl. the "no weight" → null path).
 - **T1.4** REST controllers `GET /api/recipes` (**paginated summary list** — `?limit=&offset=`,
   summary projection per D1, not full child-assembled objects) and `GET /api/recipes/:id`
   (full canonical `Recipe`); seed 2–3 example recipes (**with `food_id` left null** so the
@@ -476,7 +505,10 @@ addition, not a migration.
   (`/api` → backend) + typed API service (`HttpClient`) **coding against the D1 error
   envelope** (one `{error:{code,message,details}}` shape) + browse list page (**consuming the
   paginated summary list**) + detail page rendering title, image, source link, ingredients,
-  steps, and both macro tables (**showing the "estimated" marker when `macrosEstimated`**).
+  steps, and both macro tables (**showing the "estimated" marker when `macrosEstimated` — on
+  both the detail page and the browse list, which the summary projection already carries the
+  flag for — plus a small `macroSource` badge (ingredients/llm/manual) on the detail page so
+  provenance survives reload**).
   *Verify:* `ng build` passes and `ng test` runs green using **ChromeHeadlessNoSandbox**
   (Chromium installed in the test env); against the running API (via the dev proxy) the
   list + a detail page render a seeded recipe with both macro columns (component test
@@ -572,18 +604,25 @@ addition, not a migration.
   and gram-resolved (backend compute unit test + a form component test for the pick flow).
 - **T4.3** `POST /api/macros/estimate` + "Estimate with local LLM" button →
   `LlmMacroEstimator` (reuses `LlmClient` on the **`IHttpClient` seam**; schema-validated;
-  also returns estimated total weight), fills macro fields for user review. *Verify:* unit
-  test with the **fake `IHttpClient`** (no live LLM) fills macro fields; the user can still
-  override before save.
+  also returns estimated total weight), fills macro fields for user review **and sets
+  `macrosEstimated: true`** (LLM output is an estimate — 3rd-review Major). *Verify:* unit
+  test with the **fake `IHttpClient`** (no live LLM) fills macro fields **and asserts the
+  filled recipe carries `macrosEstimated: true`**; the user can still override before save.
 
 ## Milestone 5 — Media, polish, search
 - **T5.1** Image upload endpoint (Drogon multipart → disk volume) + external-URL option
   (**store-only, no server-side fetch — M6b/SSRF**). Concrete validation per D6/M6:
   **server-generated filename** (UUID + extension, client filename ignored — no path
   traversal), **size ≤ 8 MB**, **content-type ∈ {jpeg,png,webp} verified by magic bytes**.
-  *Verify:* uploading a valid image attaches it and renders; **oversized, wrong-type, and a
-  crafted path-traversal filename are all rejected**; an external image URL is stored and
-  **never fetched by the backend** (API test asserts no outbound request).
+  **Files are lifecycle-managed (3rd-review minor #6):** the uploads service **owns** the
+  UUID-named files it wrote and unlinks any owned file no longer referenced by a
+  `recipe_images` row — on recipe delete and on the PUT image diff (per the T1.3 ordering);
+  external-URL images own no file. *Verify:* uploading a valid image attaches it and renders;
+  **oversized, wrong-type, and a crafted path-traversal filename are all rejected**; an
+  external image URL is stored and **never fetched by the backend** (API test asserts no
+  outbound request); **deleting a recipe (and replacing an image via PUT) removes the
+  corresponding owned file from the uploads volume, and an external-URL image is never
+  touched**.
 - **T5.2** Browse **search/filter/sort** via `GET /api/recipes` query params + SQL
   (locked at GATE 0), layered onto the **paginated summary list** (`limit`/`offset`, D1):
   **title text** search (case-insensitive substring on `title`, optionally `description` —
@@ -596,7 +635,8 @@ addition, not a migration.
   Postgres FTS.)_ *Verify:* search tests return the expected subset from seeded data for a
   title query (**including a German umlaut/ß case-insensitivity case**), a tag AND-filter,
   the favorites toggle, and a `minProtein`/`maxCalories` range; confirm each sort order **and
-  that `limit`/`offset` paginate**.
+  that `limit`/`offset` paginate — and that a `limit` above the max is clamped, not honored
+  verbatim** (3rd-review minor #5).
 
 ## Milestone 6 — Deployment & docs
 - **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime), using a
@@ -630,6 +670,34 @@ _Stack is settled: Angular SPA + C++/Drogon backend + PostgreSQL._
 
 ## Reviewer notes
 _(newest round first)_
+
+**3rd external review** (`docs/reviews/PLAN_REVIEW_2026-08-24_external-3.md`, two passes,
+over the Round-10 plan): **APPROVE with findings — 0 blocking** (first time in the chain), 1
+major, 8 minor. It confirms the loop has converged (R1 3 blocking+6 major → R2 1 blocking+5
+major → R3 0 blocking+1 major) and names this the exit point. Reviewer stamp rolled back to
+fold in; all findings addressed:
+- _Major: `macrosEstimated` didn't cover the LLM-estimate path (T4.3) — LLM macros reload as
+  `false`, indistinguishable from exact_ → *Fixed* (recommended "do both", **pending human
+  override at sign-off**): broadened `macrosEstimated` to **any non-exact path incl. LLM**
+  (format + D5 + T4.3 sets it + verify), and added a **`macroSource` badge** on the detail
+  page + the estimated marker on the **list** too (T2.1).
+- _Minor #1 warning shape unpinned_ → D1 adds a **success-path warning envelope**
+  `{data,warning{code,message}}` for all three degradation flows.
+- _Minor #2 429-vs-502 ambiguous_ → D1 disambiguates (cached→200+warning; else 429/502/504
+  by upstream condition).
+- _Minor #3 macro-body schema never authored_ → T1.2 authors **`$defs/Macros`** in the same
+  Draft-7 doc; compute/estimate + Ollama `format` validate against it.
+- _Minor #4 list didn't render the flag its projection carries_ → T2.1 renders the estimated
+  marker on the list too.
+- _Minor #5 pagination default not a max_ → D1 **hard-clamps `limit`** (default 50, max e.g.
+  100) + T5.2 verify.
+- _Minor #6 uploaded files never GC'd_ → T5.1/T1.3 **lifecycle-manage owned files** (unlink
+  on delete + PUT image-diff, read filenames before cascade; external-URL untouched) + verify.
+- _Minor #7 `macrosEstimated`×override undefined_ → format: manual edit **clears** the flag;
+  PUT **recomputes** it from the payload (T1.3).
+- _Minor #8 stale "Fixed" note claimed `pg_advisory_xact_lock`_ → corrected the 2nd-review
+  Major-3 note to the actual session-lock mechanism.
+Awaiting a confirm pass, then the human signature (the exit the review recommends).
 
 **Round 10** (diff-only confirm on the Round 9 fixes): **APPROVE** — `macros_estimated`
 now consistent across format → storage → compute → detail + list display; the migration
@@ -674,7 +742,9 @@ genuinely in the body, then found **1 blocking + 5 major (two introduced by the 
   as primary (Search-a-licious is a separate service/host, a future swap), and **forbid
   `product_quantity`** (package qty, not per-piece); only cautious `serving_size`.
 - _Major 3: `pg_advisory_lock` unsound over Drogon's pooled connections_ → *Fixed*: D2/T1.1
-  use a **dedicated single connection + `pg_advisory_xact_lock`** in one wrapping txn.
+  use a **session-level `pg_advisory_lock` on a dedicated connection held across the
+  per-migration transactions** (no wrapping transaction; the `pg_advisory_xact_lock` phrasing
+  was superseded by Round 9 — see there).
 - _Major 4: API error contract (envelope + status codes) unspecified_ → *Fixed*: D1 pins one
   `{error:{code,message,details}}` envelope + a status-code table (400/422/404/502/504/429);
   T2.1/T2.2 code against it.
