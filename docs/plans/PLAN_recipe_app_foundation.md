@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: 2026-08-24   # re-APPROVED after from-scratch pivot + vcpkg-drop (both reviewed to APPROVE). Human signature is the only remaining GATE 0 step.
+  reviewer: pending      # REOPENED 2026-08-24 — 4th external review (consolidated) found 2 real contradictions + majors in the M2/M5/M6 text (tags/favorite write path; PUT recompute; NFC mechanism; uploads volume; /health routing; search collation). Folding in, then re-confirm.
   human: pending      # was 2026-08-24; reset on the from-scratch pivot, awaiting re-signature
 ---
 
@@ -53,7 +53,9 @@ addition, not a migration.
   - **HTTP client** — own client over sockets + **OpenSSL** for HTTPS (to OFF and the LLM;
     replaces libcurl), behind the `IHttpClient` seam (D3).
   - **Irreducible externals** (via **system packages / `apt`** — no package manager): **libpq**
-    (PG protocol), **OpenSSL** (TLS), a **test framework** (Catch2). Everything else is ours.
+    (PG protocol), **OpenSSL** (TLS), **utf8proc** (Unicode NFC normalization for the parser —
+    hand-rolling full NFC needs Unicode tables, so we take this one small lib; 4th-review Major),
+    and a **test framework** (Catch2). Everything else is ours.
     **No vcpkg** — the human chose system packages, knowingly trading vcpkg's reproducible,
     checked-in version pinning for a simpler, dependency-manager-free build; reproducibility
     instead rests on **pinned base-image / distro versions** in the Dockerfile (T6.1) and a
@@ -129,8 +131,9 @@ addition, not a migration.
   I/O — blocking a worker is fine at this scale. (This is where building it ourselves teaches
   the concurrency model a framework would have hidden.)
 - **Dependencies via system packages (no vcpkg):** the only externals are **libpq**,
-  **OpenSSL**, and **Catch2**, installed with **`apt`** (`libpq-dev`, `libssl-dev`,
-  `catch2`/`libcatch2-dev`) in dev (WSL) and in the Docker build stage. CMake locates them
+  **OpenSSL**, **utf8proc**, and **Catch2**, installed with **`apt`** (`libpq-dev`,
+  `libssl-dev`, `libutf8proc-dev`, `catch2`/`libcatch2-dev`) in dev (WSL) and in the Docker
+  build stage. CMake locates them
   with `find_package`/`pkg-config`. No framework, no dependency manager. (Reproducibility
   rests on pinned distro/base-image versions per D1; the build compiles **none** of these
   from source, so it is fast and light — Q8.)
@@ -145,7 +148,10 @@ addition, not a migration.
   **version-tracking runner** on startup that records applied versions in a
   `schema_migrations` table. Each migration runs **inside its own transaction** and its
   version is recorded **only on success** (a failure rolls back just that migration, not the
-  ones already committed). **Concurrent-boot safety (Q7 + 2nd-review Major 3):** the runner
+  ones already committed). **Concurrent-boot safety (Q7 + 2nd-review Major 3 — kept for future
+  scaling, not needed by the single-container deploy):** two backend instances booting at once
+  is impossible in the D6 single-container compose today; this machinery is deliberately kept
+  so a future multi-instance deploy is safe, not silent gold-plating (4th-review meta). The runner
   must hold its lock and do all its work on **one dedicated libpq connection** (not one drawn
   from our request pool) — a `pg_advisory_lock` taken from a *pooled* connection could land
   the lock, the migrations, and the unlock on **different** connections and so fail to
@@ -471,9 +477,9 @@ addition, not a migration.
 > would have given us, so later milestones have libraries to stand on. Everything here is
 > unit-tested in isolation; no recipe logic yet.
 - **T0.1** Toolchain + project skeleton: **CMake** finding the **system (apt) packages**
-  `libpq-dev`, `libssl-dev`, `catch2`/`libcatch2-dev` via `find_package`/`pkg-config` (no
-  vcpkg, no framework) + the `/backend/lib` + `/app` + `/tests` layout (D1) + a Catch2 test
-  target. Dev happens in **WSL2 (Ubuntu)**. *Verify:*
+  `libpq-dev`, `libssl-dev`, `libutf8proc-dev`, `catch2`/`libcatch2-dev` via
+  `find_package`/`pkg-config` (no vcpkg, no framework) + the `/backend/lib` + `/app` +
+  `/tests` layout (D1) + a Catch2 test target. Dev happens in **WSL2 (Ubuntu)**. *Verify:*
   `cmake --build` succeeds; a trivial Catch2 test runs green.
 - **T0.2** `net` — TCP socket listener + **HTTP/1.1 request parser** (request line, headers,
   body via `Content-Length` **and** chunked) + response writer + keep-alive + a **thread
@@ -563,8 +569,12 @@ addition, not a migration.
   replaces the child rows from that payload, reassigning `position` from array order; **a
   picked `food_id` survives an edit** because the payload carries it (a bare
   delete-and-reinsert that dropped `food_id` is explicitly rejected). **On PUT the backend
-  recomputes `macrosEstimated` from the payload's ingredient/weight resolution** rather than
-  trusting the client-sent flag (3rd-review minor #7). **Image-file GC (3rd-review minor #6):**
+  recomputes `macrosEstimated` from the payload's ingredient/weight resolution — EXCEPT when
+  `macroSource=="manual"`, where the client's flag is honored as-is (4th-review Red #2):** a
+  manual edit asserts exact values and clears the flag (per the format precedence rule), so a
+  recompute over still-approximate ingredient units must **not** flip it back to `true` and
+  re-introduce the "guessed shown as exact" state. Recompute applies only to the
+  `ingredients`/`llm` sources. **Image-file GC (3rd-review minor #6):**
   because `ON DELETE CASCADE` removes `recipe_images` rows, the service **reads the owned
   image filenames first**, then deletes the recipe, then unlinks the backend-owned files
   (best-effort, logged on failure — an orphaned file is a warning, never a failed request);
@@ -581,29 +591,41 @@ addition, not a migration.
   returns summaries honoring `limit`/`offset`, `/:id` returns a schema-valid full `Recipe`.
 
 ## Milestone 2 — Frontend scaffold, browse/detail, structured form
+- **T2.0** UI mockups (design before build) — mock the key screens in `docs/mockups/`
+  (browse/list + search bar, detail with macro tables/`—`/estimated + `macroSource` badge,
+  add/edit form incl. tags/favorite/notes/times, paste import editable preview, OFF
+  search-and-pick, empty/error/warning states). *Verify:* each screen has an agreed mock so
+  T2.1–T2.3 build against a decided design. _(This task is the plan's owner of the mockup step
+  the ROADMAP tracks as T2.0 — the two now agree; 4th-review minor.)_
 - **T2.1** Angular CLI scaffold (**exact pinned version `17.x.y`**, not `^17` — Q3) + **dev `proxy.conf.json`**
   (`/api` → backend) + typed API service (`HttpClient`) **coding against the D1 error
   envelope** (one `{error:{code,message,details}}` shape) + browse list page (**consuming the
   paginated summary list**) + detail page rendering title, image, source link, ingredients,
-  steps, and both macro tables (**showing the "estimated" marker when `macrosEstimated` — on
-  both the detail page and the browse list, which the summary projection already carries the
-  flag for — plus a small `macroSource` badge (ingredients/llm/manual) on the detail page so
-  provenance survives reload**).
+  steps, both macro tables, **and `tags` (chips), `favorite` (star), `notes`, and
+  `prepTimeMin`/`cookTimeMin` (4th-review Red #1 — these fields exist in the format and are
+  filtered on in T5.2, so they must render)** (**showing the "estimated" marker when
+  `macrosEstimated` — on both the detail page and the browse list, which the summary
+  projection already carries the flag for — plus a small `macroSource` badge
+  (ingredients/llm/manual) on the detail page so provenance survives reload**).
   *Verify:* `ng build` passes and `ng test` runs green using **ChromeHeadlessNoSandbox**
   (Chromium installed in the test env); against the running API (via the dev proxy) the
   list + a detail page render a seeded recipe with both macro columns (component test
   where practical).
 - **T2.2** Add/Edit form built with Angular **Reactive Forms** (title, description,
   servings, weight, dynamic ingredient-row `FormArray`, steps, source URL, images, macro
-  fields) → `POST`/`PUT /api/recipes` with **server-side validation** in the backend
-  (**schema-invalid → `422` with failing paths in the error envelope; unknown id → `404`**,
+  fields, **`tags` (add/remove chips — the *only* way tags are set, since the parser never
+  auto-tags), `favorite` (toggle), `notes`, `prepTimeMin`, `cookTimeMin`** — 4th-review Red
+  #1: without these the T5.2 tag/favorite filters would be dead on arrival) → `POST`/**`PUT
+  /api/recipes/:id`** with **server-side validation** in the backend (**schema-invalid → `422`
+  with failing paths in the error envelope; unknown id → `404`** — the id is in the PUT URL,
   per D1); **`PUT` sends the complete recipe** so `food_id` picks survive the full-replace
   (T1.3). Plus a **`DELETE /api/recipes/:id`** controller (exposing the T1.3 repository
   `delete`; child rows cascade) wired to a delete action in the UI with a confirm. *Verify:*
-  a valid submission persists and appears in browse; **a schema-invalid POST returns `422`
-  with the error envelope**; **a PUT edit preserves picked `food_id`s**; **deleting a recipe
-  removes it (and its child rows) from `GET /api/recipes`** (backend validation + delete API
-  test + a form-validation component test).
+  a valid submission persists and appears in browse; **a recipe saved with tags + favorite
+  round-trips and is then found by the T5.2 tag/favorite filters**; **a schema-invalid POST
+  returns `422` with the error envelope**; **a PUT edit preserves picked `food_id`s**;
+  **deleting a recipe removes it (and its child rows) from `GET /api/recipes`** (backend
+  validation + delete API test + a form-validation component test).
 - **T2.3** Wire **manual macro entry + override** into the form (self-contained; no
   nutrition DB yet). *Verify:* a recipe saved with manually entered macros persists and
   renders both macro columns; per-100 g shows "—" when no weight is given. _(Auto
@@ -625,15 +647,21 @@ addition, not a migration.
   `macroSource: "manual"`; **hashtag walls + emoji stripped** (never auto-tagged);
   **to-taste rows** (`Salz + Pfeffer`, `Petersilie zum garnieren`) → null quantity/unit;
   and any **storage/reheating block → `notes`**. Steps may be absent (video-only).
-  **UTF-8 handling per D4/B3: NFC-normalize the input first** (pasted captions may arrive
-  NFD-decomposed, e.g. `ä` = `a`+U+0308, which would break whole-token matches for
-  `Eiweiß`/`Hähnchen` and codepoint-range emoji stripping — 2nd-review minor), then **our own
-  UTF-8 scanning (no `std::regex`, no regex engine), codepoint-range emoji/symbol stripping,
-  and line-start-anchored quantities** so `140ml … 7%` doesn't misread `7`. *Verify:* unit tests parse the three
-  representative captions into the expected structured fields, including grouping,
-  null-quantity rows, the extracted macro block, empty steps, **correct emoji/umlaut
-  handling (`Eiweiß`, `Hähnchen`), an NFD-decomposed input variant, and the
-  `7%`-not-a-quantity case**.
+  **UTF-8 handling per D4/B3: NFC-normalize the input first — via `utf8proc`** (`utf8proc_NFC`;
+  pasted captions may arrive NFD-decomposed, e.g. `ä` = `a`+U+0308, which would break
+  whole-token matches for `Eiweiß`/`Hähnchen` and codepoint-range emoji stripping; full NFC
+  needs Unicode tables, so this is the one place we use an external — 4th-review Major), then
+  **our own UTF-8 scanning (no `std::regex`, no regex engine), codepoint-range emoji/symbol
+  stripping, and line-start-anchored quantities** so `140ml … 7%` doesn't misread `7`.
+  **Partial-parse behavior (4th-review minor):** `/api/parse` **always returns a draft, never
+  `422`** — a caption the rules only partially parse (e.g. no title) yields a partial `Recipe`
+  draft (200 + the warning envelope) that lands in the editable preview for the human to
+  complete; strict schema validation applies on **save** (T2.2), not on parse. *Verify:* unit
+  tests parse the three representative captions into the expected structured fields, including
+  grouping, null-quantity rows, the extracted macro block, empty steps, **correct emoji/umlaut
+  handling (`Eiweiß`, `Hähnchen`), an NFD-decomposed input variant (utf8proc NFC), and the
+  `7%`-not-a-quantity case**; a deliberately partial caption returns a partial draft + warning,
+  not a `422`.
 - **T3.2** `LlmClient` (on the **`IHttpClient` seam** from D3/B2 — real impl is the T0.8
   `httpclient`, plain-HTTP for local Ollama) + `LlmParser` (Ollama
   native `/api/chat` `format`=schema by default, OpenAI-compatible fallback; schema
@@ -678,18 +706,22 @@ addition, not a migration.
   ±5% test had) with `macrosEstimated:false`; (b) a **piece/spoon** recipe computes a full
   `totalWeightG` **and sets `macrosEstimated:true`**; (c) a recipe with an unpicked/flagged
   ingredient reports it and shows per-100 g as "—".
-- **T4.2b** `POST /api/macros/compute` + the frontend **search-and-pick UI** (per
+- **T4.2b** `POST /api/macros/compute` (sets **`macroSource: "ingredients"`** on a compute —
+  4th-review minor, so the T2.1 badge is reliable) + the frontend **search-and-pick UI** (per
   ingredient: search box → candidate list — **preferring products with complete nutriments
   / a nutrition grade** — → pick → macros fill; wired into the M2 form). *Verify:* in the
   form, searching an ingredient (mocked/live OFF) lists candidates, picking one fills its
-  macros, and per-serving + per-100 g compute correctly when all ingredients are picked
-  and gram-resolved (backend compute unit test + a form component test for the pick flow).
+  macros, per-serving + per-100 g compute correctly when all ingredients are picked and
+  gram-resolved, **and the result carries `macroSource:"ingredients"`** (backend compute unit
+  test + a form component test for the pick flow).
 - **T4.3** `POST /api/macros/estimate` + "Estimate with local LLM" button →
   `LlmMacroEstimator` (reuses `LlmClient` on the **`IHttpClient` seam**; schema-validated;
   also returns estimated total weight), fills macro fields for user review **and sets
-  `macrosEstimated: true`** (LLM output is an estimate — 3rd-review Major). *Verify:* unit
-  test with the **fake `IHttpClient`** (no live LLM) fills macro fields **and asserts the
-  filled recipe carries `macrosEstimated: true`**; the user can still override before save.
+  `macroSource: "llm"` + `macrosEstimated: true`** (LLM output is an estimate — 3rd-review
+  Major; 4th-review minor: it must set `macroSource` so the T2.1 badge is reliable). *Verify:*
+  unit test with the **fake `IHttpClient`** (no live LLM) fills macro fields **and asserts the
+  filled recipe carries `macroSource:"llm"` + `macrosEstimated: true`**; the user can still
+  override before save (which flips `macroSource` → `manual`).
 
 ## Milestone 5 — Media, polish, search
 - **T5.1** Image upload endpoint — **this task adds a `multipart/form-data` parser into the
@@ -708,15 +740,18 @@ addition, not a migration.
   touched**.
 - **T5.2** Browse **search/filter/sort** via `GET /api/recipes` query params + SQL
   (locked at GATE 0), layered onto the **paginated summary list** (`limit`/`offset`, D1):
-  **title text** search (case-insensitive substring on `title`, optionally `description` —
-  using a **German-aware case-insensitive match**, e.g. `ILIKE` under a
-  case/umlaut-appropriate collation or `citext`, so `ß`/umlaut folding behaves; 2nd-review
-  minor); **tag filter** (multi-select, **AND** semantics); a **favorites-only** toggle
-  (`favorite = true`); **macro filters** `minProtein` + `maxCalories` on the per-serving
-  macro columns; and **sort** by newest (`createdAt` desc, default), title A–Z, or highest
-  protein. _(Full-text search over ingredients/steps is deferred to a later phase — needs
-  Postgres FTS.)_ *Verify:* search tests return the expected subset from seeded data for a
-  title query (**including a German umlaut/ß case-insensitivity case**), a tag AND-filter,
+  **title text** search — **plain case-insensitivity** via **`ILIKE` under a UTF-8
+  `lc_ctype`** (`Ä`↔`ä`, `Huhn`↔`huhn`); **no accent-folding** (`Hahnchen`↔`Hähnchen` are NOT
+  equal) and **no extension** — needs no pinned PG version (4th-review Major #6; decided
+  case-insensitive-only. `citext` is explicitly rejected — it only `lower()`-folds, does not
+  strip accents; accent-folding via `unaccent` is a deferred later option). Substring on
+  `title`, optionally `description`; **tag filter** (multi-select, **AND** semantics); a
+  **favorites-only** toggle (`favorite = true`); **macro filters** `minProtein` + `maxCalories`
+  on the per-serving macro columns; and **sort** by newest (`createdAt` desc, default), title
+  A–Z, or highest protein. _(Full-text search over ingredients/steps is deferred to a later
+  phase — needs Postgres FTS.)_ *Verify:* search tests return the expected subset from seeded
+  data for a title query (**a case-insensitivity case, `Ä`↔`ä`; and a control asserting accent
+  folding is NOT applied**), a tag AND-filter,
   the favorites toggle, and a `minProtein`/`maxCalories` range; confirm each sort order **and
   that `limit`/`offset` paginate — and that a `limit` above the max is clamped, not honored
   verbatim** (3rd-review minor #5).
@@ -724,22 +759,27 @@ addition, not a migration.
 ## Milestone 6 — Deployment & docs
 - **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime), on a
   **pinned base-image tag** (reproducibility now rests on this, not a manifest — D1); the
-  build stage does **`apt install` of `libpq-dev`/`libssl-dev`/`catch2`** (prebuilt, fast).
-  The **slim runtime image MUST include the runtime libs (`libpq5`, `libssl`) and
-  `ca-certificates`** — our own OpenSSL HTTPS client (T0.8) verifies the OFF cert against the
-  system trust store, so without CA certs (or the runtime libs) the OFF path fails at deploy
-  even though it passed in dev. + Angular
-  `ng build` static bundle served by nginx with a **`location /api/ { proxy_pass → backend }`**
-  block **and a `location /uploads/`** block (same-origin in prod; nginx serves uploads — M6)
-  + `docker-compose.yml` (backend, frontend, postgres volume; `LLM_BASE_URL` → external
-  Ollama) + `.env.example`. *Verify:* `docker compose up` builds and serves the app; browse
-  works against a persisted Postgres volume; `/api/*` and `/uploads/*` are reachable through
-  nginx; **an OFF search from inside the running backend container succeeds (CA trust works)**.
+  build stage does **`apt install` of `libpq-dev`/`libssl-dev`/`libutf8proc-dev`/`catch2`**
+  (prebuilt, fast). The **slim runtime image MUST include the runtime libs (`libpq5`,
+  `libssl`, `libutf8proc`) and `ca-certificates`** — our own OpenSSL HTTPS client (T0.8)
+  verifies the OFF cert against the system trust store, so without CA certs (or the runtime
+  libs) the OFF path fails at deploy even though it passed in dev. + Angular `ng build` static
+  bundle served by nginx with a **`location /api/ { proxy_pass → backend }`** block, a
+  **`location /uploads/`** block, **and a `location /health` (or expose `/api/health`)** so the
+  T6.2 smoke test is reachable (4th-review Major #5 — nginx is the only public surface; a bare
+  `/health` would 404) + `docker-compose.yml` (backend, frontend, postgres volume, **and a
+  named `uploads` volume mounted into BOTH the backend (writes) and frontend/nginx (serves)
+  containers** — 4th-review Major #4: without a shared volume nginx 404s backend-written files
+  and uploads are lost on recreate; `LLM_BASE_URL` → external Ollama) + `.env.example`.
+  *Verify:* `docker compose up` builds and serves the app; browse works against a persisted
+  Postgres volume; `/api/*`, `/uploads/*`, and **`/health`** are reachable through nginx; **an
+  uploaded image written by the backend is served by nginx** (shared volume works); **an OFF
+  search from inside the running backend container succeeds (CA trust works)**.
 - **T6.2** `docs/` usage + config (env vars, pointing at Ollama, Postgres backup, C++
-  build notes **incl. the exact `apt install` package list — using the pinned base image's
-  real, version-specific package names** (e.g. `libssl3`, the release's Catch2 package), not
-  the generic placeholders — and the pinned base-image tag, Angular build notes, **and the
-  minimum build RAM** — Q8). **Verify the exact Ollama pull tag** for the documented `LLM_MODEL`
+  build notes **incl. the exact `apt install` package list (libpq, OpenSSL, utf8proc, Catch2)
+  — using the pinned base image's real, version-specific package names** (e.g. `libssl3`, the
+  release's `libutf8proc`/Catch2 packages), not the generic placeholders — and the pinned
+  base-image tag, Angular build notes, **and the minimum build RAM** — Q8). **Verify the exact Ollama pull tag** for the documented `LLM_MODEL`
   (`ollama list`) and put a resolvable tag in `.env.example`. *Verify:* a **concrete
   copy-pasteable sequence** from the docs succeeds: `docker compose up` → `curl /health`
   returns 200 → `POST` a sample recipe → it appears in `GET /api/recipes`.
@@ -761,6 +801,30 @@ schema/DB-over-libpq/HTTP-client; externals = libpq, OpenSSL, Catch2)** + Postgr
 
 ## Reviewer notes
 _(newest round first)_
+
+**4th external review — consolidated (2026-08-24)** (`docs/reviews/PLAN_REVIEW_2026-08-24_external-4-consolidated.md`):
+verdict "ready at M1 today; one corrective pass before M2." Ran against the **pre-pivot** plan
+(cites Drogon/vcpkg/RE2/valijson), so some findings were stale; the **live** ones (unaffected by
+the from-scratch/vcpkg changes) were all folded in:
+- _🔴 tags/favorite/notes/times had no write path (T2.2 omitted them → T5.2 filters dead)_ →
+  *Fixed*: added to T2.1 render + T2.2 form (+ round-trip/filter verify).
+- _🔴 PUT recompute of `macrosEstimated` fought the "manual edit clears it" rule_ → *Fixed*:
+  T1.3 suppresses recompute when `macroSource=="manual"`.
+- _🟠 NFC had no mechanism (worse post-pivot: no libs)_ → **Decided (human): add `utf8proc`**
+  (apt) — the one external for the parser; D1/D2/T0.1/T3.1/T6.1/T6.2 updated.
+- _🟠 uploads not a shared volume_ → *Fixed*: T6.1 declares a named `uploads` volume in both
+  backend + nginx.
+- _🟠 `/health` unreachable through nginx_ → *Fixed*: T6.1 adds `location /health`.
+- _🟠 ß/umlaut search wrong (citext/collation/PG-version)_ → **Decided (human): plain
+  case-insensitive `ILIKE`** (no extension, any PG version); citext rejected; accent-folding
+  deferred. T5.2 updated.
+- _minors_ → PUT URL `:id` (T2.2), `macroSource` set by T4.2b(`ingredients`)/T4.3(`llm`),
+  `/api/parse` returns a partial draft not `422` (T3.1), ROADMAP T2.0 reconciled into the plan,
+  migration-concurrency marked "kept for future scaling" (D2). Handoff §3 + example-recipes
+  fixture note fixed in their own files.
+- _stale (already resolved by the pivot; noted, not acted)_ → NFC-lib-in-vcpkg, valijson
+  `$schema`, Drogon `DbClient connectionNumber=1`, Drogon/vcpkg first-build risk.
+Awaiting a confirm pass, then the human signature.
 
 **Drop vcpkg (2026-08-24)** — after the from-scratch pivot was reviewer-approved, the human
 chose to **drop vcpkg too and use system packages (`apt`)** for the three externals

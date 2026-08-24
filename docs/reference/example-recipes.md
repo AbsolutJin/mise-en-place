@@ -31,8 +31,9 @@ Cremige Chicken Parmesan Pasta (Meal Prep)
 
 Teaches: caption already supplies per-portion macros (`macroSource: "manual"`);
 nullable quantity/unit for `Salz + Pfeffer` and garnish `Petersilie`; count unit
-(`Stück`) for `Knoblauchzehen`; empty `steps` (instructions only in the video);
-`(Meal Prep)` → a tag.
+(`Stück`) for `Knoblauchzehen`; empty `steps` (instructions only in the video).
+_(Note: `(Meal Prep)` is a **candidate** tag the user may add in the form — the rule-based
+parser does NOT auto-extract tags, T3.1; tags are user-curated via the T2.2 form.)_
 
 ---
 
