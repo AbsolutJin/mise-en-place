@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: 2026-08-24   # re-APPROVED after the external-review fold-in (Round 8 confirm); rolled back once mid-session, see Reviewer notes
+  reviewer: pending      # rolled back again 2026-08-24 — 2nd external review found 1 blocking + 5 major (2 introduced by the M2 fix); addressing + re-review
   human: pending      # date (YYYY-MM-DD) on human approval
 ---
 
@@ -55,6 +55,21 @@ addition, not a migration.
   /docs
   docker-compose.yml
   ```
+- **API conventions (2nd-review Major 4 + 5 — pinned once, used everywhere):**
+  - **Error envelope:** every non-2xx response is one JSON shape —
+    `{ "error": { "code": "<machine_slug>", "message": "<human text>", "details": <any?> } }`
+    — so the typed frontend service (T2.1) has one thing to code against.
+  - **Status codes:** `400` malformed request; `422` schema-invalid `Recipe`/macro body
+    (valijson failure, with failing paths in `details`); `404` unknown `:id`; `502` when a
+    required upstream (OFF/LLM) is unreachable and no cached result exists; `504` upstream
+    timeout; OFF **`429` is surfaced as `429`** (not masked). D6's "graceful degradation"
+    uses this envelope — e.g. `/api/foods/search` returns `200` with cached-only results +
+    a `warning`, or `502` only when nothing is cached.
+  - **List vs detail + pagination:** `GET /api/recipes` returns a **lightweight summary
+    projection** (id, title, first image, `favorite`, per-serving macros, tags) — **not**
+    full child-assembled objects — and is **paginated** via `?limit=&offset=` (a sane default
+    cap, e.g. 50). Full canonical `Recipe` (all child tables assembled) is only
+    `GET /api/recipes/:id`. This bounds the browse query as the store grows.
 - **Trade-off accepted:** two build systems and two deploys; the `Recipe` type is
   **not auto-shared** across C++/TS — three representations (JSON Schema, C++ struct, TS
   type) are kept in sync **by hand** this phase, a known drift risk (Q9). Mitigated by D2
@@ -88,11 +103,15 @@ addition, not a migration.
 - **Migrations:** plain **SQL files** in `/backend/migrations`, applied by a small
   **version-tracking runner** on startup that records applied versions in a
   `schema_migrations` table. Each migration runs **inside a transaction** and its version
-  is recorded **only on success** (so a failed migration doesn't half-apply); the runner
-  takes a **Postgres advisory lock** (`pg_advisory_lock`) around the run so two instances
-  booting concurrently can't race (Q7). ("Idempotent" = safe to re-run the runner, via
-  version-tracking; the DDL itself is not required to be idempotent.) No ORM code-gen
-  magic — easy to read while learning.
+  is recorded **only on success** (so a failed migration doesn't half-apply). **Concurrent-
+  boot safety (Q7 + 2nd-review Major 3):** the runner must hold its lock and do its work on
+  **one physical connection** — a session-level `pg_advisory_lock` from Drogon's *pooled*
+  `DbClient` can land the lock, the migrations, and the unlock on **different** pooled
+  connections and so fail to serialize. So the runner uses a **dedicated single connection**
+  (not the shared pool) and **`pg_advisory_xact_lock` inside one wrapping transaction**, or
+  equivalently holds a session advisory lock on that one dedicated connection for the whole
+  run. ("Idempotent" = safe to re-run the runner via version-tracking; the DDL itself is not
+  required to be idempotent.) No ORM code-gen magic — easy to read while learning.
 - **Relational storage shape (B1 — decided, not JSONB blobs):**
   - `recipes` — one row per recipe: scalar fields (`title`, `description`, `source_url`,
     `servings`, `prep_time_min`, `cook_time_min`, `total_weight_g`, `favorite`, `notes`,
@@ -108,8 +127,11 @@ addition, not a migration.
   - `recipe_steps` — **child table**, FK `recipe_id`, `position`, `text`. (Ordered; may
     be empty for video-only captions.)
   - `recipe_images` — **child table**, FK `recipe_id`, `position`, `url`.
-  - `recipe_tags` — **join table**, `(recipe_id, tag)` unique. The T5.2 **tag AND-filter**
-    is `... WHERE tag = ANY($tags) GROUP BY recipe_id HAVING count(*) = $n`.
+  - `recipe_tags` — **join table**, FK `recipe_id`, `tag`, plus a **`position`** so the
+    `tags[]` array order round-trips (unique on `(recipe_id, tag)`). The T5.2 **tag
+    AND-filter** is `... WHERE tag = ANY($tags) GROUP BY recipe_id HAVING count(*) = $n`.
+  - **All child/join tables** carry `FK recipe_id … ON DELETE CASCADE`, so
+    `DELETE /api/recipes/:id` (T2.2) removes the whole aggregate cleanly.
   - Rationale: ordered/queried collections are real rows (clean ordering, the tag-filter
     and macro-range SQL in T5.2, and future FTS all work), not opaque JSONB. The canonical
     `Recipe` **JSON** is assembled from these tables at the API boundary (D2's interchange
@@ -224,10 +246,14 @@ addition, not a migration.
   match (the previous plan's biggest accuracy risk), the user **searches OFF for each
   ingredient and picks the right food**; `quantity × per-100 g` → macros. This removes
   the risky fuzzy auto-match.
-- **OFF API contract (M1 — verify current limits before building backoff):** text search
-  via **Search-a-licious** (`/api/v2/search`) as the current path; the legacy
-  `/cgi/search.pl?search_terms=…&json=1` is documented "not recommended for new
-  integrations" and is only a fallback, not the pinned primary. Product reads by barcode.
+- **OFF API contract (M1 + 2nd-review Major 2 — endpoint/service pinned correctly):** these
+  are **distinct** and must not be conflated. **Primary text search = the classic OFF API v2
+  search, `GET https://world.openfoodfacts.org/api/v2/search`** (documented, stable).
+  **Search-a-licious** is the *newer, separate* search service on its **own host**
+  (`https://search.openfoodfacts.org`, its own `/search` endpoint) meant to eventually
+  replace v2 — a valid future swap behind the `NutritionSource` interface, **not** the same
+  thing as `/api/v2/search`. The legacy `/cgi/search.pl` is deprecated ("not recommended for
+  new integrations") — last-resort fallback only. Product reads by barcode.
   OFF **mandates a descriptive `User-Agent`** (e.g. `mise-en-place/0.1 (contact)`) — the
   default libcurl UA is throttled/blocked — and enforces **rate limits** returning 429.
   **Do not hard-code the old "~100/min product" figure — it is wrong/too high** (current
@@ -258,10 +284,18 @@ addition, not a migration.
   virtually every real recipe. To fix that, the converter also carries a **small
   piece-weight table** (e.g. 1 clove ≈ 5 g, 1 onion ≈ 150 g, 1 egg ≈ 60 g, 1 bell pepper
   ≈ 150 g) and **fixed spoon volumes** (TL/tsp ≈ 5 ml, EL/tbsp ≈ 15 ml → grams via the
-  density table), and uses **OFF `serving_size`/`product_quantity` when parseable** as a
-  per-piece weight. These are **approximate defaults, clearly overridable**, but they let
-  common recipes reach a full `totalWeightG`. Units with no table entry and no density
-  remain **flagged** (not silently zeroed).
+  density table). It may use OFF **`serving_size`** *only* when it clearly parses as a
+  single-piece weight; it must **not** use OFF **`product_quantity`** — that is the
+  **package** quantity (e.g. 500 g for a bag of rice), **not** a per-piece weight (2nd-review
+  Major 2). These are **approximate defaults, clearly overridable**. Units with no table
+  entry and no density remain **flagged** (not silently zeroed).
+- **Honesty of approximate macros (2nd-review Major 1 — introduced by the M2 fix):** the
+  piece/spoon table feeds **both** the weight denominator **and** each ingredient's grams, so
+  when it contributes, the shown per-serving macros *and* per-100 g are **approximate**. To
+  avoid presenting guessed numbers as exact, the recipe carries **`macrosEstimated: true`**
+  whenever any piece/spoon-table (or serving_size-derived) weight fed the math, and the **UI
+  marks those macros "estimated"**. This restores the honesty the strict "—" used to give,
+  without going dark for real recipes.
 - **LLM-estimate button:** asks the local LLM for per-portion macros (and an estimated
   total weight) when the DB lookup is incomplete or the user prefers it.
 - **Manual:** the user can always type/override macros.
@@ -356,8 +390,15 @@ addition, not a migration.
   "macrosPerServing": { "calories": 0, "protein": 0, "carbs": 0, "fat": 0 },
   // macrosPer100g is DERIVED: perServing × servings ÷ totalWeightG × 100 (null if no weight)
   "macroSource": "ingredients | llm | manual",
-                                    // caption-provided macros fold into "manual"
-                                    //   (the user vets them in the editable preview)
+                                    // PRIMARY provenance. Precedence: any manual edit to a
+                                    //   macro or to totalWeightG flips this to "manual"
+                                    //   (captures the "computed then hand-overridden" case
+                                    //   the single enum otherwise can't; finer per-field
+                                    //   provenance is a future schemaVersion bump).
+  "macrosEstimated": false,         // TRUE when approximate piece/spoon weights (the M2
+                                    //   table) fed the macro/weight math, so both
+                                    //   macrosPerServing and per-100 g are approximate and
+                                    //   the UI marks them "estimated" — not shown as exact.
   "createdAt": "iso", "updatedAt": "iso"
 }
 ```
@@ -374,8 +415,9 @@ addition, not a migration.
   framework — Catch2**; jsoncpp comes vendored with Drogon) + Drogon skeleton; `/health`
   endpoint; Postgres connection from env; **`setThreadNum`** sized (D2/M3); a
   **version-tracking migration runner** with a `schema_migrations` table that wraps each
-  migration in a **transaction** (version recorded only on success) and takes a
-  **`pg_advisory_lock`** around the run (Q7); `docker-compose` with a postgres service for
+  migration in a **transaction** (version recorded only on success) and, on a **dedicated
+  single connection** (not the shared pool), takes **`pg_advisory_xact_lock`** so concurrent
+  boots serialize (Q7 + 2nd-review Major 3); `docker-compose` with a postgres service for
   dev. *Verify:* `cmake --build` succeeds (first build pulls Drogon's deps, slow); app
   boots; `GET /health` returns 200; logs show a successful Postgres connection; re-running
   the app does not re-apply migrations; a deliberately failing migration leaves
@@ -390,40 +432,54 @@ addition, not a migration.
   column here, no FK yet** (the `foods` table lands in T4.1), and the section column is
   `group_label` not the reserved word `group`; language-neutral unit vocabulary),
   **`recipe_steps`** (FK, `position`, `text`),
-  **`recipe_images`** (FK, `position`, `url`); **join table `recipe_tags`** (`recipe_id`,
-  `tag`); C++ model structs + jsoncpp (de)serialization that **assemble/emit the canonical
-  `Recipe` JSON from these tables** + a **`valijson` validation function**. *Verify:*
-  migrations apply on a fresh DB; unit test round-trips a `Recipe` struct↔JSON (via the
-  child tables) — including a **grouped, to-taste-ingredient recipe** (null quantity/unit),
-  ordered `steps`, and an **empty-`steps`** recipe — and `valijson` **rejects a
+  **`recipe_images`** (FK, `position`, `url`); **join table `recipe_tags`** (FK, `tag`,
+  `position`) — all child/join FKs **`ON DELETE CASCADE`**; C++ model structs + jsoncpp
+  (de)serialization that **assemble/emit the canonical `Recipe` JSON from these tables**
+  (note the JSON↔column name maps, e.g. `macrosPerServing.calories` ↔ column `cal`) + a
+  **`valijson` validation function**. *Verify:* migrations apply on a fresh DB; unit test
+  round-trips a `Recipe` struct↔JSON (via the child tables) — including a **grouped,
+  to-taste-ingredient recipe** (null quantity/unit), ordered `steps`, an **empty-`steps`**
+  recipe, **and `tags[]` + `images[]` with order preserved** — and `valijson` **rejects a
   schema-invalid document** and accepts a valid one.
 - **T1.3** Recipe repository/service (create, read, list, update, delete) via Drogon
   `DbClient` (`execSqlSync`) — writing/reading across the parent + child tables in a
-  transaction; per-100 g derived computation. *Verify:* integration tests run against a
-  **dedicated test Postgres** (compose service; migrations applied before the suite; **each
-  test truncates the recipe tables** for determinism — Q1) for CRUD incl. a
-  multi-group/multi-step recipe, plus a unit test for per-100 g (incl. the "no weight" →
-  null path).
-- **T1.4** REST controllers `GET /api/recipes` (list) and `GET /api/recipes/:id`; seed
-  2–3 example recipes. *Verify:* integration test hits both endpoints and gets the seeded
-  recipes as schema-valid `Recipe` JSON.
+  transaction; per-100 g derived computation. **Update (PUT) strategy (2nd-review blocker):
+  a full-replace within one transaction** — the client PUTs the *complete* recipe (the M2
+  form already holds every ingredient's `foodId`, so it round-trips them), and the service
+  replaces the child rows from that payload, reassigning `position` from array order; **a
+  picked `food_id` survives an edit** because the payload carries it (a bare
+  delete-and-reinsert that dropped `food_id` is explicitly rejected). *Verify:* integration
+  tests run against a **dedicated test Postgres** (compose service; migrations applied
+  before the suite; **each test truncates the recipe tables** for determinism — Q1) for CRUD
+  incl. a multi-group/multi-step recipe, **a PUT edit that preserves `food_id` picks and
+  reorders ingredients**, plus a unit test for per-100 g (incl. the "no weight" → null path).
+- **T1.4** REST controllers `GET /api/recipes` (**paginated summary list** — `?limit=&offset=`,
+  summary projection per D1, not full child-assembled objects) and `GET /api/recipes/:id`
+  (full canonical `Recipe`); seed 2–3 example recipes (**with `food_id` left null** so the
+  T4.1 FK-add finds no orphans). *Verify:* integration test hits both endpoints — the list
+  returns summaries honoring `limit`/`offset`, `/:id` returns a schema-valid full `Recipe`.
 
 ## Milestone 2 — Frontend scaffold, browse/detail, structured form
 - **T2.1** Angular CLI scaffold (**exact pinned version `17.x.y`**, not `^17` — Q3) + **dev `proxy.conf.json`**
-  (`/api` → backend) + typed API service (`HttpClient`) + browse list page + detail page
-  rendering title, image, source link, ingredients, steps, and both macro tables.
+  (`/api` → backend) + typed API service (`HttpClient`) **coding against the D1 error
+  envelope** (one `{error:{code,message,details}}` shape) + browse list page (**consuming the
+  paginated summary list**) + detail page rendering title, image, source link, ingredients,
+  steps, and both macro tables (**showing the "estimated" marker when `macrosEstimated`**).
   *Verify:* `ng build` passes and `ng test` runs green using **ChromeHeadlessNoSandbox**
   (Chromium installed in the test env); against the running API (via the dev proxy) the
   list + a detail page render a seeded recipe with both macro columns (component test
   where practical).
 - **T2.2** Add/Edit form built with Angular **Reactive Forms** (title, description,
   servings, weight, dynamic ingredient-row `FormArray`, steps, source URL, images, macro
-  fields) → `POST`/`PUT /api/recipes` with **server-side validation** in the backend; plus
-  a **`DELETE /api/recipes/:id`** controller (exposing the T1.3 repository `delete`) wired
-  to a delete action in the UI with a confirm. *Verify:* a valid submission persists and
-  appears in browse; invalid input is rejected with a message; **deleting a recipe removes
-  it from `GET /api/recipes`** (backend validation + delete API test + a form-validation
-  component test).
+  fields) → `POST`/`PUT /api/recipes` with **server-side validation** in the backend
+  (**schema-invalid → `422` with failing paths in the error envelope; unknown id → `404`**,
+  per D1); **`PUT` sends the complete recipe** so `food_id` picks survive the full-replace
+  (T1.3). Plus a **`DELETE /api/recipes/:id`** controller (exposing the T1.3 repository
+  `delete`; child rows cascade) wired to a delete action in the UI with a confirm. *Verify:*
+  a valid submission persists and appears in browse; **a schema-invalid POST returns `422`
+  with the error envelope**; **a PUT edit preserves picked `food_id`s**; **deleting a recipe
+  removes it (and its child rows) from `GET /api/recipes`** (backend validation + delete API
+  test + a form-validation component test).
 - **T2.3** Wire **manual macro entry + override** into the form (self-contained; no
   nutrition DB yet). *Verify:* a recipe saved with manually entered macros persists and
   renders both macro columns; per-100 g shows "—" when no weight is given. _(Auto
@@ -445,16 +501,20 @@ addition, not a migration.
   `macroSource: "manual"`; **hashtag walls + emoji stripped** (never auto-tagged);
   **to-taste rows** (`Salz + Pfeffer`, `Petersilie zum garnieren`) → null quantity/unit;
   and any **storage/reheating block → `notes`**. Steps may be absent (video-only).
-  **UTF-8 handling per D4/B3: use RE2 (not `std::regex`), codepoint-range emoji/symbol
-  stripping, and line-start-anchored quantities** so `140ml … 7%` doesn't misread `7`.
-  *Verify:* unit tests parse the three representative captions into the expected structured
-  fields, including grouping, null-quantity rows, the extracted macro block, empty steps,
-  **correct emoji/umlaut handling (`Eiweiß`, `Hähnchen`) and the `7%`-not-a-quantity case**.
+  **UTF-8 handling per D4/B3: NFC-normalize the input first** (pasted captions may arrive
+  NFD-decomposed, e.g. `ä` = `a`+U+0308, which would break whole-token matches for
+  `Eiweiß`/`Hähnchen` and codepoint-range emoji stripping — 2nd-review minor), then **use
+  RE2 (not `std::regex`), codepoint-range emoji/symbol stripping, and line-start-anchored
+  quantities** so `140ml … 7%` doesn't misread `7`. *Verify:* unit tests parse the three
+  representative captions into the expected structured fields, including grouping,
+  null-quantity rows, the extracted macro block, empty steps, **correct emoji/umlaut
+  handling (`Eiweiß`, `Hähnchen`), an NFD-decomposed input variant, and the
+  `7%`-not-a-quantity case**.
 - **T3.2** `LlmClient` (on the **`IHttpClient` seam** from D3/B2) + `LlmParser` (Ollama
   native `/api/chat` `format`=schema by default, OpenAI-compatible fallback; schema
   validation; fallback on invalid). Documented fallback = on invalid/unparseable LLM JSON,
   return a **best-effort or empty draft into the editable preview with a warning** (no
-  auto-retry, no silent save). *Verify:* unit test with the **fake `HttpClient`** (no live
+  auto-retry, no silent save). *Verify:* unit test with the **fake `IHttpClient`** (no live
   LLM, no real libcurl) asserts valid JSON is accepted and malformed JSON triggers that
   documented fallback — an empty/partial draft plus a warning flag, not an exception or a
   saved record.
@@ -464,7 +524,8 @@ addition, not a migration.
 
 ## Milestone 4 — Macros from Open Food Facts (search & pick) + LLM estimate
 - **T4.1** `NutritionSource` interface + **OFF client** (on the **`IHttpClient` seam**
-  from D3/B2 → OFF **Search-a-licious `/api/v2/search`** primary, legacy `/cgi/search.pl`
+  from D3/B2 → **OFF API v2 search `/api/v2/search`** primary (**not** Search-a-licious,
+  which is a separate service/host — see D5 Major 2), legacy `/cgi/search.pl` last-resort
   fallback; **descriptive `User-Agent`**; 429/backoff) + migration creating the **`foods`
   cache table (surrogate UUID `id` PK, `code` UNIQUE)** and **adding the FK constraint
   `recipe_ingredients.food_id → foods.id`** onto the column that already exists from T1.2
@@ -483,12 +544,14 @@ addition, not a migration.
 - **T4.2** Macro engine: for ingredients with a picked `foodId`, sum `quantity × per-100 g`
   → totals → per-serving + per-100 g. Ingredients with **no pick**, a product **missing
   `*_100g` nutriments**, or an **unresolvable unit** are surfaced to the UI (never zeroed),
-  and any of them makes `totalWeightG` partial → per-100 g renders **"—"**. *Verify:* a
-  **representative fixture-style recipe** (mixing g, a piece unit, and a spoon unit — i.e.
-  resolved via the M2 table, not only exact grams) computes a full `totalWeightG` and
-  correct per-serving + per-100 g **within a
-  defined tolerance** (e.g. ±5%); a recipe with an unpicked/flagged ingredient reports it
-  and shows per-100 g as "—".
+  and any of them makes `totalWeightG` partial → per-100 g renders **"—"**. **Sets
+  `macrosEstimated: true` whenever a piece/spoon-table (or serving_size) weight fed the math**
+  (2nd-review Major 1), so the UI can mark those macros estimated rather than exact. *Verify:*
+  (a) an **all-exact-grams** recipe computes per-serving + per-100 g against **hand-computed
+  expected values** (not the converter's own constants — avoids the tautology the earlier
+  ±5% test had) with `macrosEstimated:false`; (b) a **piece/spoon** recipe computes a full
+  `totalWeightG` **and sets `macrosEstimated:true`**; (c) a recipe with an unpicked/flagged
+  ingredient reports it and shows per-100 g as "—".
 - **T4.2b** `POST /api/macros/compute` + the frontend **search-and-pick UI** (per
   ingredient: search box → candidate list — **preferring products with complete nutriments
   / a nutrition grade** — → pick → macros fill; wired into the M2 form). *Verify:* in the
@@ -510,14 +573,18 @@ addition, not a migration.
   crafted path-traversal filename are all rejected**; an external image URL is stored and
   **never fetched by the backend** (API test asserts no outbound request).
 - **T5.2** Browse **search/filter/sort** via `GET /api/recipes` query params + SQL
-  (locked at GATE 0): **title text** search (case-insensitive substring on `title`,
-  optionally `description`); **tag filter** (multi-select, **AND** semantics); a
-  **favorites-only** toggle (`favorite = true`); **macro filters** `minProtein` +
-  `maxCalories` on `macrosPerServing`; and **sort** by newest (`createdAt` desc, default),
-  title A–Z, or highest protein. _(Full-text search over ingredients/steps is deferred to
-  a later phase — needs Postgres FTS.)_ *Verify:* search tests return the expected subset
-  from seeded data for a title query, a tag AND-filter, the favorites toggle, and a
-  `minProtein`/`maxCalories` range, and confirm each sort order.
+  (locked at GATE 0), layered onto the **paginated summary list** (`limit`/`offset`, D1):
+  **title text** search (case-insensitive substring on `title`, optionally `description` —
+  using a **German-aware case-insensitive match**, e.g. `ILIKE` under a
+  case/umlaut-appropriate collation or `citext`, so `ß`/umlaut folding behaves; 2nd-review
+  minor); **tag filter** (multi-select, **AND** semantics); a **favorites-only** toggle
+  (`favorite = true`); **macro filters** `minProtein` + `maxCalories` on the per-serving
+  macro columns; and **sort** by newest (`createdAt` desc, default), title A–Z, or highest
+  protein. _(Full-text search over ingredients/steps is deferred to a later phase — needs
+  Postgres FTS.)_ *Verify:* search tests return the expected subset from seeded data for a
+  title query (**including a German umlaut/ß case-insensitivity case**), a tag AND-filter,
+  the favorites toggle, and a `minProtein`/`maxCalories` range; confirm each sort order **and
+  that `limit`/`offset` paginate**.
 
 ## Milestone 6 — Deployment & docs
 - **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime), using a
@@ -551,6 +618,36 @@ _Stack is settled: Angular SPA + C++/Drogon backend + PostgreSQL._
 
 ## Reviewer notes
 _(newest round first)_
+
+**2nd external review** (`docs/reviews/PLAN_REVIEW_2026-08-24_external-2.md`, two independent
+passes, over the Round-8 plan): **CHANGES REQUIRED** — it confirmed the Round 7 fixes are
+genuinely in the body, then found **1 blocking + 5 major (two introduced by the M2 fix) +
+6 minor**. Reviewer stamp **rolled back again**. All addressed:
+- _BLOCKING: PUT child-table update semantics undefined (delete-and-reinsert would drop
+  `food_id` picks)_ → *Fixed*: T1.3 pins a **full-replace in one transaction** where the
+  client PUTs the complete recipe (form holds every `foodId`), so **picks survive** and
+  `position` is reassigned from array order; T2.2 verify checks it.
+- _Major 1: piece/spoon weights make macros approximate but shown as exact (introduced by
+  M2)_ → *Fixed*: added **`macrosEstimated`** to the `Recipe` format; D5/T4.2 set it whenever
+  a piece/spoon/serving_size weight fed the math; UI marks those macros "estimated".
+- _Major 2: OFF endpoint/service conflated ("Search-a-licious `/api/v2/search`") + misuse of
+  `product_quantity` as per-piece weight_ → *Fixed*: D5/T4.1 pin **OFF API v2 `/api/v2/search`**
+  as primary (Search-a-licious is a separate service/host, a future swap), and **forbid
+  `product_quantity`** (package qty, not per-piece); only cautious `serving_size`.
+- _Major 3: `pg_advisory_lock` unsound over Drogon's pooled connections_ → *Fixed*: D2/T1.1
+  use a **dedicated single connection + `pg_advisory_xact_lock`** in one wrapping txn.
+- _Major 4: API error contract (envelope + status codes) unspecified_ → *Fixed*: D1 pins one
+  `{error:{code,message,details}}` envelope + a status-code table (400/422/404/502/504/429);
+  T2.1/T2.2 code against it.
+- _Major 5: `GET /api/recipes` had no summary projection / pagination_ → *Fixed*: D1 + T1.4 +
+  T5.2 — list returns a **paginated summary projection** (`limit`/`offset`); full object only
+  on `/:id`.
+- _Minors_ → all fixed: `IHttpClient` name corrected in T3.2 verify; **NFC-normalize** parser
+  input (T3.1) + German-aware case-insensitive title search (T5.2); `macroSource` precedence
+  rule (any manual edit → "manual"); T1.2 round-trip now covers `tags`/`images` with order
+  (added `position` to `recipe_tags`); seed recipes leave `food_id` null + **`ON DELETE
+  CASCADE`** on child tables (T1.2/T1.4); `macrosPerServing.calories`↔`cal` mapping noted.
+Awaiting a fresh workflow-reviewer pass on these fixes.
 
 **Round 8** (diff-only confirm on the Round 7 fixes): **APPROVE** — all six changes
 verified in place and consistent (food_id/foods sequencing, foodId/UUID, group_label,
