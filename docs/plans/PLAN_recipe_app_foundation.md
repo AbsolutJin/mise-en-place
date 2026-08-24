@@ -1,9 +1,9 @@
 ---
 plan: recipe_app_foundation
-status: draft
+status: approved
 approvals:
-  reviewer: 2026-08-24   # APPROVED (Round 12 confirm) after folding in all 3 external reviews; rolled back 3× mid-session, see Reviewer notes. Human signature is the only remaining GATE 0 step.
-  human: pending      # date (YYYY-MM-DD) on human approval
+  reviewer: 2026-08-24   # APPROVED (Round 12 confirm) after folding in all 3 external reviews; rolled back 3× mid-session, see Reviewer notes.
+  human: 2026-08-24    # GATE 0 human approval — auth-ready-no-auth + all six milestones + TLS caveat, macrosEstimated "do both"
 ---
 
 # Plan — mise-en-place recipe app (foundation)
