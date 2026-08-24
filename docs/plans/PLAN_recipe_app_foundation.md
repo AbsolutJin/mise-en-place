@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: pending      # REOPENED 2026-08-24 — 5th external review (targets the new from-scratch M0) found 2 security blockers (TLS hostname verification; no sanitizers/fuzzing) + process/technical majors. Folding in, then re-confirm.
+  reviewer: 2026-08-24   # re-APPROVED after folding the 5th external review (M0 security pass — TLS hostname verify, sanitizers/fuzzing, digest pin, HTTP anti-smuggling, ROADMAP rewrite). Human signature is the only remaining GATE 0 step.
   human: pending      # was 2026-08-24; reset on the from-scratch pivot, awaiting re-signature
 ---
 
@@ -226,7 +226,7 @@ addition, not a migration.
   `LLM_BASE_URL` (server root, default `http://localhost:11434`), `LLM_MODEL` (**no baked
   default — documentation-only; if unset, the LLM engine is unavailable and the toggle is
   disabled, never a silent guess**), optional `LLM_API_KEY`.
-- **Endpoint + structured output (M5):** default to **Ollama's native `/api/chat` with the
+- **Endpoint + structured output (built T3.2/M3, reused T4.3/M4):** default to **Ollama's native `/api/chat` with the
   `format` parameter set to the `Recipe`/macro JSON Schema** — reports indicate the native
   `format` (schema-enforced) is **more reliable** than the OpenAI-compatible
   `/v1/chat/completions` + `response_format: json_schema` path, which several models
@@ -883,7 +883,15 @@ but not ready to sign — blockers in the hand-rolled networking + doc/process."
 - _open decision surfaced to the human_ → the review questions whether the **hand-rolled TLS
   client** specifically is worth it (poor learning-signal-per-risk); left for the human at
   sign-off (default: keep from-scratch + the S1 fix).
-Awaiting a confirm pass, then the human signature (do NOT stamp until the human signs).
+**Confirm pass:** reviewer verified all ten change-sets **present, correct, and consistent**
+(S1 TLS hostname verify sound; S2 sanitizers/fuzzing; ROADMAP clean of old stack; seven
+milestones; M0 self-contained; digest pin; anti-smuggling; `type:[…,"null"]`; minors) and
+M0→M6 ordering intact. One blocking finding — the freshly-rewritten ROADMAP claimed reviewer
+approval before this pass granted it — resolved by stamping `approvals.reviewer: 2026-08-24`
+now (the pass's intended output), so ROADMAP + frontmatter agree (reviewer-approved,
+human-pending). One non-blocking (a D3 "M5" mislabel → "T3.2/M3, T4.3/M4") also fixed. **Human
+GATE 0 signature is the only remaining step; do NOT stamp `approvals.human` until the user
+signs.**
 
 **4th external review — consolidated (2026-08-24)** (`docs/reviews/PLAN_REVIEW_2026-08-24_external-4-consolidated.md`):
 verdict "ready at M1 today; one corrective pass before M2." Ran against the **pre-pivot** plan
