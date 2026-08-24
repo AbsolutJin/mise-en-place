@@ -42,7 +42,8 @@ addition, not a migration.
 - **Backend:** **C++17/20, no web framework** — the app builds its own small libraries:
   - **HTTP server** — a TCP listener over OS sockets, an **HTTP/1.1 request parser**
     (request line, headers, body, `Content-Length`/chunked), keep-alive, a **thread pool**
-    for concurrency, and **multipart/form-data** parsing for uploads (M5).
+    for concurrency. (**multipart/form-data** parsing is added into `net` when first needed,
+    at M5/T5.1 — not part of the M0 server scope.)
   - **Router** — method + path (with `:id` params) → handler; a request/response abstraction.
   - **JSON** — own parser + serializer (replaces jsoncpp) and own **JSON-Schema validation**
     to the extent the `Recipe`/`Macros` schema needs (replaces valijson).
@@ -84,7 +85,7 @@ addition, not a migration.
     cached-only; the parse LLM-invalid draft, T3.2; the LLM-macro fallback, T4.3). Absent
     `warning` ⇒ a clean result.
   - **Status codes:** `400` malformed request; `422` schema-invalid `Recipe`/macro body
-    (valijson failure, with failing paths in `details`); `404` unknown `:id`; `504` upstream
+    (our own validator, M0 `jsonschema`, failure — with failing paths in `details`); `404` unknown `:id`; `504` upstream
     timeout. **OFF-throttling behaviour for `/api/foods/search` (3rd-review minor #2):** if
     any **local candidate** exists → `200` + cached results + `warning`; otherwise propagate
     the upstream condition — OFF returned `429` → **`429`**; OFF unreachable → **`502`**;
@@ -361,7 +362,7 @@ addition, not a migration.
 
 ### D6 — Media, source link, deployment
 - **Images (M6 — concrete limits, not just "validated"):** optional upload(s) via our **own
-  multipart/form-data parser (M0 `net`)** → disk volume, referenced by URL. The backend
+  multipart/form-data parser (added into `net` at T5.1)** → disk volume, referenced by URL. The backend
   **generates its own filename** (UUID + validated extension) and **never trusts the client
   filename** (no path traversal); it enforces **size ≤ 8 MB** and **content-type ∈ {jpeg,
   png, webp}** verified by magic bytes, not just the header. The uploads directory is
@@ -470,10 +471,14 @@ addition, not a migration.
   `cmake --build` succeeds; a trivial Catch2 test runs green.
 - **T0.2** `net` — TCP socket listener + **HTTP/1.1 request parser** (request line, headers,
   body via `Content-Length` **and** chunked) + response writer + keep-alive + a **thread
-  pool** (D2). Hardening: cap header size / count and body size; reject malformed requests
-  with `400`. *Verify:* unit tests parse well-formed and malformed requests (partial, oversized
-  headers, bad `Content-Length`); an integration test makes a real localhost request and gets
-  the expected response; oversized body/headers are rejected, not OOM'd.
+  pool** (D2). Hardening: cap header size / count **and total body size (enforced *during*
+  chunked decode too, where there is no upfront `Content-Length`)**; reject malformed with
+  `400`; a **socket read/idle timeout** so a slow/stalled client (slowloris-style) cannot pin
+  a pool worker indefinitely. *Verify:* unit tests parse well-formed and malformed requests
+  (partial, oversized headers, bad `Content-Length`); an integration test makes a real
+  localhost request and gets the expected response; oversized body/headers (incl. a chunked
+  body exceeding the cap) are rejected, not OOM'd; a stalled connection is closed on timeout,
+  freeing its worker.
 - **T0.3** `router` + request/response abstraction: `method + path` (with `:id` params) →
   handler; unknown path → `404`, wrong method → `405`; the **error envelope + warning
   envelope** helpers (D1). *Verify:* routing tests incl. `:id` extraction, `404`/`405`, and
@@ -487,14 +492,25 @@ addition, not a migration.
   failing path. *Verify:* accepts a valid `Recipe` and a valid `Macros` body; rejects each
   violation class (wrong type, missing required, bad enum, bad `$ref` target) with the path.
 - **T0.6** `db` — libpq wrapper: a **connection pool**, **parameterized `exec`** (`$1,$2…`
-  binds — SQL is never string-concatenated), result→row mapping, and a transaction helper.
-  *Verify:* against a dev Postgres, a parameterized round-trip returns rows; a value
-  containing SQL metacharacters passed as a **bind** is stored/returned literally (injection
-  inert); the pool hands out and returns connections under concurrent use.
+  binds — SQL is never string-concatenated), result→row mapping, and a transaction helper;
+  plus a **standalone (non-pooled) `connect()`** the migration runner (T1.1) uses to hold its
+  advisory lock on one dedicated connection (D2). *Verify:* against a dev Postgres, a
+  parameterized round-trip returns rows; a value containing SQL metacharacters passed as a
+  **bind** is stored/returned literally (injection inert); the pool hands out and returns
+  connections under concurrent use; a standalone connection can be opened outside the pool.
 - **T0.7** App wiring: `main()` starts the `net` server on a port, mounts the `router`, builds
   the `db` pool from env, adds structured logging + config; `/health` endpoint. *Verify:*
   the app boots; **`GET /health` → 200 through our own server**; logs show a successful DB
   connection.
+- **T0.8** `httpclient` — the **own HTTP/1.1 client** that fulfills the `IHttpClient` seam
+  (D3), used by the LLM + OFF clients (T3.2/T4.1/T4.3). Scope: connect over sockets; write an
+  HTTP/1.1 request; read the response incl. **chunked-transfer decode**; response body-size
+  cap; **HTTPS via OpenSSL with certificate verification ON + SNI** (OFF is public-internet),
+  and **plain HTTP** for the local Ollama path; a read/connect **timeout**. *Verify (real
+  network, kept out of the default unit suite):* an HTTPS `GET` to a known good host succeeds
+  and its cert is verified; a host with an **invalid/mismatched cert is rejected**, not
+  silently accepted; a **plain-HTTP** GET to a local test server works; a chunked response
+  decodes correctly; the fake `IHttpClient` remains what the T3.2/T4.1/T4.3 unit tests use.
 - **🚦 M0 review** — `workflow:review` at the boundary passes _(the libraries are the
   foundation everything else stands on — worth a careful read)._
 
@@ -612,7 +628,8 @@ addition, not a migration.
   null-quantity rows, the extracted macro block, empty steps, **correct emoji/umlaut
   handling (`Eiweiß`, `Hähnchen`), an NFD-decomposed input variant, and the
   `7%`-not-a-quantity case**.
-- **T3.2** `LlmClient` (on the **`IHttpClient` seam** from D3/B2) + `LlmParser` (Ollama
+- **T3.2** `LlmClient` (on the **`IHttpClient` seam** from D3/B2 — real impl is the T0.8
+  `httpclient`, plain-HTTP for local Ollama) + `LlmParser` (Ollama
   native `/api/chat` `format`=schema by default, OpenAI-compatible fallback; schema
   validation; fallback on invalid). Documented fallback = on invalid/unparseable LLM JSON,
   return a **best-effort or empty draft into the editable preview with a warning** (no
@@ -626,7 +643,8 @@ addition, not a migration.
 
 ## Milestone 4 — Macros from Open Food Facts (search & pick) + LLM estimate
 - **T4.1** `NutritionSource` interface + **OFF client** (on the **`IHttpClient` seam**
-  from D3/B2 → **OFF API v2 search `/api/v2/search`** primary (**not** Search-a-licious,
+  from D3/B2 — real impl is the T0.8 `httpclient`, **HTTPS with cert verification** to the
+  public OFF host → **OFF API v2 search `/api/v2/search`** primary (**not** Search-a-licious,
   which is a separate service/host — see D5 Major 2), legacy `/cgi/search.pl` last-resort
   fallback; **descriptive `User-Agent`**; 429/backoff) + migration creating the **`foods`
   cache table (surrogate UUID `id` PK, `code` UNIQUE)** and **adding the FK constraint
@@ -668,7 +686,8 @@ addition, not a migration.
   filled recipe carries `macrosEstimated: true`**; the user can still override before save.
 
 ## Milestone 5 — Media, polish, search
-- **T5.1** Image upload endpoint (**our own multipart/form-data parser, M0 `net`** → disk volume) + external-URL option
+- **T5.1** Image upload endpoint — **this task adds a `multipart/form-data` parser into the
+  `net` lib** (deferred from M0, first needed here) → disk volume + external-URL option
   (**store-only, no server-side fetch — M6b/SSRF**). Concrete validation per D6/M6:
   **server-generated filename** (UUID + extension, client filename ignored — no path
   traversal), **size ≤ 8 MB**, **content-type ∈ {jpeg,png,webp} verified by magic bytes**.
@@ -699,12 +718,15 @@ addition, not a migration.
 ## Milestone 6 — Deployment & docs
 - **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime), using a
   **vcpkg binary cache (or a prebuilt-deps base image)** so libpq/OpenSSL aren't recompiled
-  every build (Q8) + Angular `ng build` static bundle served by nginx with a
-  **`location /api/ { proxy_pass → backend }`** block **and a `location /uploads/`** block
-  (same-origin in prod; nginx serves uploads — M6) + `docker-compose.yml` (backend,
-  frontend, postgres volume; `LLM_BASE_URL` → external Ollama) + `.env.example`. *Verify:*
-  `docker compose up` builds and serves the app; browse works against a persisted Postgres
-  volume; `/api/*` and `/uploads/*` are reachable through nginx.
+  every build (Q8). The **slim runtime image MUST include `ca-certificates`** — our own
+  OpenSSL HTTPS client (T0.8) verifies the OFF cert against the system trust store, so
+  without CA certs the OFF path fails at deploy even though it passed in dev. + Angular
+  `ng build` static bundle served by nginx with a **`location /api/ { proxy_pass → backend }`**
+  block **and a `location /uploads/`** block (same-origin in prod; nginx serves uploads — M6)
+  + `docker-compose.yml` (backend, frontend, postgres volume; `LLM_BASE_URL` → external
+  Ollama) + `.env.example`. *Verify:* `docker compose up` builds and serves the app; browse
+  works against a persisted Postgres volume; `/api/*` and `/uploads/*` are reachable through
+  nginx; **an OFF search from inside the running backend container succeeds (CA trust works)**.
 - **T6.2** `docs/` usage + config (env vars, pointing at Ollama, Postgres backup, C++
   build/vcpkg notes, Angular build notes, **and the minimum build RAM** so a small VPS
   doesn't OOM — Q8). **Verify the exact Ollama pull tag** for the documented `LLM_MODEL`
@@ -741,7 +763,23 @@ seam, own validator); parser uses **own UTF-8 scanning, no RE2**; multipart is o
 toolchain, `net`/HTTP server, `router`, `json`, `jsonschema`, `db`, `/health` wiring) inserted
 before M1; **M1 becomes "Schema, DB, browse API" on the M0 libs** (T1.1 = migration runner,
 T1.2–T1.4 unchanged in number). M2–M6 (Angular, paste, OFF, media, deploy) keep their numbers
-and all task references. Awaiting a fresh reviewer pass, then the human signature.
+and all task references. **T0.8 `httpclient` added** after the pivot review (below).
+
+**Pivot review R1** (workflow reviewer over the from-scratch revision, aimed at
+implementability + hand-rolling security): **CHANGES REQUIRED** — 1 blocking + 4 non-blocking,
+all addressed:
+- _BLOCKING: the own HTTP **client** (HTTPS/OpenSSL) was declared in D1/D3 but built by no
+  task_ → *Fixed*: added **T0.8 `httpclient`** (OpenSSL TLS with cert verification + SNI,
+  chunked decode, timeouts, body cap) with a real-network verify; referenced from T3.2/T4.1;
+  pinned **`ca-certificates` in the slim runtime image** (T6.1).
+- _NB multipart built by no task_ → *Fixed*: D1/D6/T5.1 state it's added into `net` at **T5.1**.
+- _NB stale `valijson` in the D1 `422` line_ → *Fixed*: "our own validator (M0 `jsonschema`)".
+- _NB T0.6 lacked the non-pooled connection T1.1's migration lock needs_ → *Fixed*: standalone
+  `connect()` added to T0.6.
+- _NB no server idle timeout (slowloris); body cap not enforced on chunked decode_ → *Fixed*:
+  T0.2 adds a read/idle timeout + chunked-body cap.
+Reviewer confirmed the other from-scratch claims sound and that previously-approved content
+survived intact. Awaiting a confirm pass, then human signature.
 
 **Round 12** (diff-only confirm on the 3rd-review fold-in): **APPROVE** — `macrosEstimated`
 verified consistent across format/D5/T4.2/T4.3/T2.1/D1; `definitions/Macros`, file-GC
