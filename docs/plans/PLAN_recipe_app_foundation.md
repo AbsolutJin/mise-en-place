@@ -1,9 +1,9 @@
 ---
 plan: recipe_app_foundation
-status: approved
+status: draft
 approvals:
-  reviewer: 2026-08-24   # APPROVED (Round 12 confirm) after folding in all 3 external reviews; rolled back 3× mid-session, see Reviewer notes.
-  human: 2026-08-24    # GATE 0 human approval — auth-ready-no-auth + all six milestones + TLS caveat, macrosEstimated "do both"
+  reviewer: pending      # REOPENED 2026-08-24 — human chose to drop Drogon/framework and build the backend "from sockets up" (own HTTP server/router/JSON/schema/DB-over-libpq/HTTP-client). Material D1–D3 + milestone change; was approved (reviewer+human 2026-08-24), now re-planning + re-review.
+  human: pending      # was 2026-08-24; reset on the from-scratch pivot
 ---
 
 # Plan — mise-en-place recipe app (foundation)
@@ -26,31 +26,50 @@ addition, not a migration.
 
 ## Locked design decisions
 > These are the decisions agreed with the human at GATE 0. A **C++ backend was
-> explicitly chosen to learn C++** — this is a deliberate trade of extra plumbing
-> for that goal, and the plan is sequenced to introduce the C++/Drogon stack
-> milestone by milestone.
+> explicitly chosen to learn C++**, and (revised 2026-08-24) the human chose to build it
+> **from scratch — no web framework** — because building the fundamentals (an HTTP server,
+> router, JSON, a DB layer over libpq, an HTTP client) is the point. This is a deliberate,
+> knowing trade of substantial extra plumbing for that learning; the plan front-loads a
+> **core-libraries milestone (M0)** so later milestones stand on our own libs.
 
-### D1 — Architecture: split frontend + C++ backend (monorepo)
-- **Backend:** **C++17/20 with the [Drogon](https://github.com/drogonframework/drogon)
-  web framework** — HTTP routing (controllers), an async **PostgreSQL** driver, JSON
-  (jsoncpp), and multipart file uploads, all built in. Chosen so the learning effort
-  goes into recipe logic, not raw sockets/DB plumbing.
+### D1 — Architecture: split frontend + **from-scratch** C++ backend (monorepo)
+> **Revised 2026-08-24 — the human chose to build the backend "from sockets up" rather than
+> use a web framework, because building the fundamentals is the point of the learn-C++ goal.**
+> This trades a large amount of up-front plumbing for that learning, and is accepted knowingly.
+> Deploy target is Linux behind a VPN (D6), which bounds the security exposure of a hand-rolled
+> HTTP server. Dev happens in **WSL2 (Ubuntu)** on the same OS family as deploy.
+
+- **Backend:** **C++17/20, no web framework** — the app builds its own small libraries:
+  - **HTTP server** — a TCP listener over OS sockets, an **HTTP/1.1 request parser**
+    (request line, headers, body, `Content-Length`/chunked), keep-alive, a **thread pool**
+    for concurrency, and **multipart/form-data** parsing for uploads (M5).
+  - **Router** — method + path (with `:id` params) → handler; a request/response abstraction.
+  - **JSON** — own parser + serializer (replaces jsoncpp) and own **JSON-Schema validation**
+    to the extent the `Recipe`/`Macros` schema needs (replaces valijson).
+  - **DB layer** — a thin C++ wrapper over **libpq** (connect from a pool, parameterized
+    `exec`, map results to structs). libpq speaks the Postgres wire protocol; we do NOT
+    reimplement that — using libpq is using Postgres's own client, not a framework.
+  - **HTTP client** — own client over sockets + **OpenSSL** for HTTPS (to OFF and the LLM;
+    replaces libcurl), behind the `IHttpClient` seam (D3).
+  - **Irreducible externals kept** (via vcpkg): **libpq** (PG protocol), **OpenSSL** (TLS),
+    a **test framework** (Catch2). Everything else is ours.
 - **Frontend:** **Angular SPA** (Angular CLI, `ng build` → static bundle), served as
   static files; it calls the backend over HTTP at `/api/*`. Chosen to learn a robust,
   structured framework; its **Reactive Forms** suit the dynamic ingredient-row form and
   editable paste-preview particularly well. **Pin an exact Angular version** (a specific
   `17.x.y`, not "v17+") in `package.json` up front — a floor like `^17` lets a fresh build
   pull a newer major with different builder/test defaults, the exact drift a pin prevents.
-  The version affects the application-builder and test defaults and the proxy config.
 - **Same-origin strategy (no CORS):** in **dev**, `ng serve` (:4200) proxies `/api` →
-  the Drogon backend via `frontend/proxy.conf.json` (`ng serve --proxy-config`); in
-  **prod**, nginx serves the static bundle and **reverse-proxies `/api/*`** to the
-  backend (see T6.1). This keeps calls same-origin, so no browser CORS is needed. If any
-  cross-origin path is later introduced, add a Drogon CORS filter/advice.
+  the backend via `frontend/proxy.conf.json` (`ng serve --proxy-config`); in **prod**,
+  nginx serves the static bundle and **reverse-proxies `/api/*`** to the backend (see T6.1).
+  Same-origin, so no browser CORS is needed. If any cross-origin path is later introduced,
+  the own HTTP layer adds the CORS response headers.
 - **Monorepo layout:**
   ```
-  /backend    C++ Drogon API (CMake, vcpkg)
-    /controllers  /models  /services  /data  /migrations  /tests
+  /backend    C++ from-scratch API (CMake, vcpkg for libpq/OpenSSL/Catch2)
+    /lib          our libraries: /net (sockets+http server) /router /json /db /httpclient
+    /app          /controllers  /models  /services  /migrations
+    /tests
   /frontend   Angular SPA
   /docs
   docker-compose.yml
@@ -91,37 +110,38 @@ addition, not a migration.
   round-trip test; a codegen step (e.g. `json-schema-to-typescript` for the TS type) is a
   clean later addition if drift bites.
 
-### D2 — Storage: PostgreSQL, with JSON as the interchange format
-- **PostgreSQL** via Drogon's `DbClient`. Chosen over SQLite because the human intends
-  to add **auth / multi-user later**, where Postgres is the sturdier base; the extra
-  container is cheap under Docker Compose. **DB access uses the synchronous
-  `execSqlSync` style** — chosen over coroutines/callbacks to keep it approachable for a
-  C++ beginner; standardized in docs.
-- **Threading (M3 — honest statement):** Drogon request handlers run **on the event-loop
-  threads**, and `execSqlSync` (and the synchronous libcurl calls to OFF/LLM) **block the
-  calling loop thread**. For a **single user** this is acceptable; we do **not** claim
-  non-blocking I/O. Mitigation: size the loop pool with **`setThreadNum`** (a small N, e.g.
-  4–8) so one blocked handler doesn't stall the app, and keep long outbound calls (OFF/LLM)
-  on request paths the user initiates. (Drogon's async value is largely unused this phase;
-  accepted as a beginner-friendly trade — see Q2 in Reviewer notes.)
-- **vcpkg note:** Drogon must be pulled with the **`postgres` feature** enabled
-  (`"drogon": { "features": ["postgres"] }` in `vcpkg.json`) — the default port has no
-  libpq backend and `DbClient` for Postgres won't link without it. First build compiles
-  Drogon's dependency tree and is slow (see Q8 for the Docker build-cost mitigation).
-- **JSON Schema validation:** jsoncpp (bundled with Drogon) only parses/serializes, so a
-  dedicated validator is required — **`valijson`** (header-only, in vcpkg, has a jsoncpp
-  adapter). **valijson supports JSON Schema Draft 7** (and a Draft 4 subset) — **not**
-  2019-09/2020-12 — so the `Recipe` schema is authored to **Draft 7** and carries the
-  matching `"$schema"` (Q4), or it silently under-validates. This backs every
-  "schema-validated" step (T1.2, T3.2, T4.3).
+### D2 — Storage: PostgreSQL (own libpq wrapper), with JSON as the interchange format
+- **PostgreSQL** via our **own DB layer over libpq** (D1). Chosen over SQLite because the
+  human intends to add **auth / multi-user later**, where Postgres is the sturdier base; the
+  extra container is cheap under Docker Compose. The DB layer exposes a small **synchronous**
+  API — connect (from our own connection pool), **parameterized `exec`** (`$1,$2…` binds,
+  never string-concatenated SQL → no injection), and result→struct mapping — kept synchronous
+  to stay approachable while learning.
+- **Threading (own thread pool):** the HTTP server (D1) dispatches each request to a
+  **worker thread** from our pool; a worker owns a libpq connection for the request and the
+  blocking `exec`/HTTPS calls happen on that worker, never on the accept loop. For a
+  **single user** a small pool (e.g. 4–8 workers) is ample; we do **not** claim non-blocking
+  I/O — blocking a worker is fine at this scale. (This is where building it ourselves teaches
+  the concurrency model a framework would have hidden.)
+- **vcpkg note:** the `vcpkg.json` manifest pulls only the **irreducible externals** —
+  **libpq** (`libpq`), **OpenSSL** (`openssl`), and **Catch2**. No web framework. (The build
+  is far lighter than the old Drogon tree; Q8's Docker build-cost mitigation still applies to
+  libpq/OpenSSL.)
+- **JSON + schema validation are OURS (D1):** own parser/serializer, and own validation of
+  the `Recipe`/`Macros` schema. The schema in `docs/` stays the single source of truth, but
+  since we validate it ourselves we are **not bound to a library's supported draft** — we
+  author it to a clear, self-consistent subset (object/array/string/number/enum/required/
+  nullable + `definitions/Macros` via `$ref`) and our validator implements exactly that
+  subset. This backs every "schema-validated" step (T2.x, T3.2, T4.3). (Supersedes the old
+  valijson/Draft-7 constraint.)
 - **Migrations:** plain **SQL files** in `/backend/migrations`, applied by a small
   **version-tracking runner** on startup that records applied versions in a
   `schema_migrations` table. Each migration runs **inside its own transaction** and its
   version is recorded **only on success** (a failure rolls back just that migration, not the
   ones already committed). **Concurrent-boot safety (Q7 + 2nd-review Major 3):** the runner
-  must hold its lock and do all its work on **one dedicated physical connection** (not the
-  shared pool) — a `pg_advisory_lock` from Drogon's *pooled* `DbClient` can land the lock,
-  the migrations, and the unlock on **different** pooled connections and so fail to
+  must hold its lock and do all its work on **one dedicated libpq connection** (not one drawn
+  from our request pool) — a `pg_advisory_lock` taken from a *pooled* connection could land
+  the lock, the migrations, and the unlock on **different** connections and so fail to
   serialize. Concretely: acquire a **session-level `pg_advisory_lock` on that one dedicated
   connection, held across all the per-migration transactions**, then release it at the end.
   (A single wrapping transaction is *not* used — that would give all-or-nothing rollback
@@ -167,9 +187,9 @@ addition, not a migration.
   references **`foods.id`**; cache-hit resolution can look up by either `id` or the unique
   `code`.
 - **Standardised recipe format (`Recipe`)** is defined once as a **JSON Schema in
-  `docs/`** (the single source of truth), mirrored by a C++ struct (jsoncpp
-  serialization) and a TS type. It is validated at every API boundary, on paste-parser
-  output, on LLM output, and used for export. So "everything becomes standardised
+  `docs/`** (the single source of truth), mirrored by a C++ struct (our own JSON
+  (de)serialization) and a TS type. It is validated (by our own validator) at every API
+  boundary, on paste-parser output, on LLM output, and used for export. So "everything becomes standardised
   JSON" holds at the API/interchange layer; Postgres is the persistence detail. The format
   carries a **`schemaVersion`** — under relational storage this **earns its keep mainly at
   the export/interchange layer** (a stored-format change is a SQL migration regardless), so
@@ -177,14 +197,12 @@ addition, not a migration.
   later; JSON stays canonical.)
 
 ### D3 — Local-LLM integration (pluggable, behind an HTTP-client seam)
-- **HTTP-client seam (B2 — testability):** outbound HTTP does **not** call libcurl
-  directly from `LlmClient`/the OFF client. A tiny **`IHttpClient` interface** (named with
-  the `I` prefix to avoid colliding with Drogon's own `HttpClient` class) — `get`/`post` →
-  status + body — has a **libcurl (synchronous) implementation** for production and a
+- **HTTP-client seam (B2 — testability):** outbound HTTP goes through a tiny
+  **`IHttpClient` interface** (`get`/`post` → status + body), with **our own client
+  implementation** (sockets + **OpenSSL** for HTTPS — D1) for production and a
   **fake/stub implementation** for tests. This is the seam the mocked-HTTP verifications in
-  T3.2, T4.1, and T4.3 depend on — without it, direct libcurl is not mockable. (libcurl
-  sync chosen over Drogon's event-loop-bound `HttpClient` for beginner simplicity; note
-  HTTPS pulls in OpenSSL. Blocking behaviour is covered in D2/M3.)
+  T3.2, T4.1, and T4.3 depend on — the real client is never hit in tests. Blocking behaviour
+  runs on a worker thread (D2).
 - `LlmClient` (built on the `IHttpClient` seam) calls a local LLM. Config via env:
   `LLM_BASE_URL` (server root, default `http://localhost:11434`), `LLM_MODEL` (**no baked
   default — documentation-only; if unset, the LLM engine is unavailable and the toggle is
@@ -194,9 +212,10 @@ addition, not a migration.
   `format` (schema-enforced) is **more reliable** than the OpenAI-compatible
   `/v1/chat/completions` + `response_format: json_schema` path, which several models
   **ignore**. The OpenAI-compatible surface is kept as a **configurable fallback** for
-  non-Ollama servers. Either way, **every response is validated with `valijson`** against
-  the schema, with the documented graceful fallback (an empty/partial draft into the
-  editable preview + a warning — see D4/T3.2) on invalid output. Not prompt-only coercion.
+  non-Ollama servers. Either way, **every response is validated with our own validator (M0
+  `jsonschema`)** against the schema, with the documented graceful fallback (an empty/partial
+  draft into the editable preview + a warning — see D4/T3.2) on invalid output. Not
+  prompt-only coercion.
 - LLM is **off unless the engine toggle selects it**, so the app is fully usable with
   no LLM running.
 - **No translation:** the LLM only parses captions into schema JSON, **preserving the
@@ -211,7 +230,7 @@ addition, not a migration.
   the `.env.example` default actually resolves. If strict JSON adherence ever becomes the bottleneck despite structured
   output, **Gemma 4 27B (Q4_K_M)** is a noted alternative. (Rationale: 2026 benchmarks
   put Qwen3 as the leader for non-English/German, while JSON reliability here comes from
-  the server's structured-output mode + `valijson` validation + fallback, not model
+  the server's structured-output mode + our own schema validation + fallback, not model
   obedience.)
 
 ### D4 — Paste parsing: two engines behind one interface
@@ -224,14 +243,14 @@ addition, not a migration.
     fully handles the pinned caption patterns (sections→`group`, quantity/unit regex,
     macro block, to-taste rows, parenthetical→note, hashtag/emoji stripping). Offline,
     free, deterministic; the app is fully usable with no LLM running.
-    - **UTF-8 is a first-class concern (B3), not trivial regex.** Captions are full of
-      multi-byte content — emoji (🍗💪🛒), umlauts/ß (`Eiweiß`, `Hähnchen`, `Kohlenhydrate`),
-      `%`/`€`. **`std::regex` is not UTF-8-aware** (it byte-matches under the default
-      locale) and must **not** carry the parsing. Strategy: use a **UTF-8-aware regex
-      engine — `RE2`** (Google, in vcpkg, UTF-8/Unicode-aware) — added to the T1.1 manifest;
-      strip emoji/symbols by **Unicode codepoint ranges** (decode UTF-8 → filter), not byte
-      hacks; and **anchor quantity matches at line/token start** so `140ml Kochsahne 7%`
-      does not read the `7` as a quantity. German unit words (`TL`/`EL`/`Stück`/`Prise`)
+    - **UTF-8 is a first-class concern (B3), handled by our own scanning — no regex engine.**
+      Captions are full of multi-byte content — emoji (🍗💪🛒), umlauts/ß (`Eiweiß`,
+      `Hähnchen`, `Kohlenhydrate`), `%`/`€`. Consistent with the from-scratch decision (D1)
+      and the minimal externals (no `re2`), the parser does its **own UTF-8-aware scanning**:
+      decode to Unicode codepoints, **strip emoji/symbols by codepoint ranges** (not byte
+      hacks), tokenize on whitespace/punctuation, and match units/labels/quantities as tokens
+      — **anchoring quantity matches at line/token start** so `140ml Kochsahne 7%` does not
+      read the `7` as a quantity. German unit words (`TL`/`EL`/`Stück`/`Prise`)
       and macro labels (`Eiweiß`/`Kohlenhydrate`/`Fett`) are matched as whole tokens.
   - `LlmParser` — **the fallback** for messy captions the rules miss: sends pasted text
     + the `Recipe` JSON Schema to the local LLM, asks for schema-valid JSON, validates it.
@@ -274,8 +293,9 @@ addition, not a migration.
   replace v2 — a valid future swap behind the `NutritionSource` interface, **not** the same
   thing as `/api/v2/search`. The legacy `/cgi/search.pl` is deprecated ("not recommended for
   new integrations") — last-resort fallback only. Product reads by barcode.
-  OFF **mandates a descriptive `User-Agent`** (e.g. `mise-en-place/0.1 (contact)`) — the
-  default libcurl UA is throttled/blocked — and enforces **rate limits** returning 429.
+  OFF **mandates a descriptive `User-Agent`** (e.g. `mise-en-place/0.1 (contact)`) — a
+  generic/empty UA is throttled/blocked, so our HTTP client always sets it — and OFF enforces
+  **rate limits** returning 429.
   **Do not hard-code the old "~100/min product" figure — it is wrong/too high** (current
   reported product limit is materially lower, ~15/min; search ~10/min). **T4.1 must confirm
   the exact current limits against the live OFF docs** and size the backoff conservatively
@@ -340,12 +360,12 @@ addition, not a migration.
   weight if they want cooked-basis per-100 g.
 
 ### D6 — Media, source link, deployment
-- **Images (M6 — concrete limits, not just "validated"):** optional upload(s) via Drogon
-  multipart → disk volume, referenced by URL. The backend **generates its own filename**
-  (UUID + validated extension) and **never trusts the client filename** (no path traversal);
-  it enforces **size ≤ 8 MB** and **content-type ∈ {jpeg, png, webp}** verified by magic
-  bytes, not just the header. The uploads directory is **served by nginx** in prod (a
-  `location /uploads/` block), not by Drogon.
+- **Images (M6 — concrete limits, not just "validated"):** optional upload(s) via our **own
+  multipart/form-data parser (M0 `net`)** → disk volume, referenced by URL. The backend
+  **generates its own filename** (UUID + validated extension) and **never trusts the client
+  filename** (no path traversal); it enforces **size ≤ 8 MB** and **content-type ∈ {jpeg,
+  png, webp}** verified by magic bytes, not just the header. The uploads directory is
+  **served by nginx** in prod (a `location /uploads/` block), not by the app.
 - **External image URL (M6b — no SSRF):** the "external image URL" option is **store-only**
   — the URL is saved and rendered by the browser; the **backend does not fetch it**. This
   closes the SSRF hole (a server-side fetch could hit the home LAN / Ollama / Postgres).
@@ -357,8 +377,9 @@ addition, not a migration.
   subject to OFF's rate limits); optional Ollama for LLM features. **Graceful degradation:**
   if OFF is unreachable, search returns cached-only results with a clear message, and
   manual + LLM macro entry still work — a network outage never blocks recipe entry.
-- **Build cost (Q8):** the vcpkg build compiles Drogon's whole dependency tree from
-  scratch — slow and memory-hungry, and a risk of **OOM on a small VPS**. Mitigate with a
+- **Build cost (Q8 — much smaller now):** the vcpkg build compiles only libpq + OpenSSL +
+  Catch2 (no framework tree), so build time/RAM are far lower than before — but OpenSSL is
+  still non-trivial, so on a small VPS there is some **OOM risk**. Mitigate with a
   **vcpkg binary cache** (or a prebuilt-deps base image) so the deps compile once, and
   document the minimum build RAM in T6.2.
 - **Auth assumption (M6c):** the app is **unauthenticated this phase** (single user).
@@ -439,31 +460,62 @@ addition, not a migration.
 
 ---
 
-## Milestone 1 — Backend scaffold, schema, DB, browse API
-- **T1.1** C++ toolchain + CMake + **`vcpkg.json` manifest** (`drogon[postgres]`,
-  `valijson`, `libcurl`, **`re2`** (UTF-8-aware regex for T3.1, B3), and a **named test
-  framework — Catch2**; jsoncpp comes vendored with Drogon) + Drogon skeleton; `/health`
-  endpoint; Postgres connection from env; **`setThreadNum`** sized (D2/M3); a
-  **version-tracking migration runner** with a `schema_migrations` table that wraps each
-  migration in its **own transaction** (version recorded only on success) and, on a
-  **dedicated single connection** (not the shared pool), holds a **session-level
-  `pg_advisory_lock` across all the per-migration transactions** (releasing at the end) so
-  concurrent boots serialize (Q7 + 2nd-review Major 3, per D2); `docker-compose` with a
-  postgres service for dev. *Verify:* `cmake --build` succeeds (first build pulls Drogon's
-  deps, slow); app boots; `GET /health` returns 200; logs show a successful Postgres
-  connection; re-running the app does not re-apply migrations; a deliberately failing
-  migration leaves `schema_migrations` unchanged (that migration's transaction rolls back).
+## Milestone 0 — Core backend libraries (from scratch)
+> New milestone from the 2026-08-24 from-scratch pivot (D1). Builds the plumbing a framework
+> would have given us, so later milestones have libraries to stand on. Everything here is
+> unit-tested in isolation; no recipe logic yet.
+- **T0.1** Toolchain + project skeleton: **CMake** + **`vcpkg.json` manifest** (only
+  **`libpq`**, **`openssl`**, **`catch2`** — no framework) + the `/backend/lib` + `/app` +
+  `/tests` layout (D1) + a Catch2 test target. Dev happens in **WSL2 (Ubuntu)**. *Verify:*
+  `cmake --build` succeeds; a trivial Catch2 test runs green.
+- **T0.2** `net` — TCP socket listener + **HTTP/1.1 request parser** (request line, headers,
+  body via `Content-Length` **and** chunked) + response writer + keep-alive + a **thread
+  pool** (D2). Hardening: cap header size / count and body size; reject malformed requests
+  with `400`. *Verify:* unit tests parse well-formed and malformed requests (partial, oversized
+  headers, bad `Content-Length`); an integration test makes a real localhost request and gets
+  the expected response; oversized body/headers are rejected, not OOM'd.
+- **T0.3** `router` + request/response abstraction: `method + path` (with `:id` params) →
+  handler; unknown path → `404`, wrong method → `405`; the **error envelope + warning
+  envelope** helpers (D1). *Verify:* routing tests incl. `:id` extraction, `404`/`405`, and
+  an envelope-shaped error body.
+- **T0.4** `json` — own parser + serializer (objects, arrays, strings **with unicode
+  escapes**, numbers, `true`/`false`/`null`), round-tripping to a small DOM/value type.
+  *Verify:* round-trip tests incl. nested structures, unicode escapes, big/edge numbers, and
+  malformed input → a clear parse error (never a crash).
+- **T0.5** `jsonschema` — own validator for the **authored subset** the app uses (types,
+  `required`, `enum`, nullable, arrays, and `$ref` to `#/definitions/Macros`), reporting the
+  failing path. *Verify:* accepts a valid `Recipe` and a valid `Macros` body; rejects each
+  violation class (wrong type, missing required, bad enum, bad `$ref` target) with the path.
+- **T0.6** `db` — libpq wrapper: a **connection pool**, **parameterized `exec`** (`$1,$2…`
+  binds — SQL is never string-concatenated), result→row mapping, and a transaction helper.
+  *Verify:* against a dev Postgres, a parameterized round-trip returns rows; a value
+  containing SQL metacharacters passed as a **bind** is stored/returned literally (injection
+  inert); the pool hands out and returns connections under concurrent use.
+- **T0.7** App wiring: `main()` starts the `net` server on a port, mounts the `router`, builds
+  the `db` pool from env, adds structured logging + config; `/health` endpoint. *Verify:*
+  the app boots; **`GET /health` → 200 through our own server**; logs show a successful DB
+  connection.
+- **🚦 M0 review** — `workflow:review` at the boundary passes _(the libraries are the
+  foundation everything else stands on — worth a careful read)._
+
+## Milestone 1 — Schema, DB, browse API (on the M0 libs)
+- **T1.1** **Migration runner** (on the M0 `db` lib) with a `schema_migrations` table: plain
+  SQL files, each migration in its **own transaction** (version recorded only on success),
+  the runner holding a **session-level `pg_advisory_lock` on one dedicated libpq connection
+  across all the per-migration transactions** (releasing at the end) so concurrent boots
+  serialize (Q7 + 2nd-review Major 3, per D2); `docker-compose` with a postgres service for
+  dev. *Verify:* migrations apply on boot; re-running does not re-apply; a deliberately
+  failing migration leaves `schema_migrations` unchanged (that migration's transaction rolls
+  back).
 - **T1.2** `Recipe` JSON Schema in `docs/` (source of truth — the **locked field list**
-  above; authored to **JSON Schema Draft 7** with the matching `"$schema"`, the draft
-  valijson supports — Q4). **Also author the macro body as a named sub-schema
-  `definitions/Macros`** (Draft-7's reusable-subschema keyword is `definitions`, not the
-  2019-09 `$defs`) inside the same document (the `{calories,protein,carbs,fat}` shape),
-  referenced by `macrosPerServing` via `"$ref": "#/definitions/Macros"`; `POST
-  /api/macros/compute` and `POST /api/macros/estimate` validate their request/response macro
-  bodies against it, and the Ollama `format` for the
-  macro estimator (D3) uses the same sub-schema — so the D1 `422` path and every
-  "schema-validated **macro** body" step has one authored schema, not a second source of
-  truth (3rd-review minor #3). SQL migrations for the **relational shape decided in D2/B1**:
+  above), authored to the **self-consistent subset our own validator implements** (D2 — not
+  bound to a library's draft). **Also author the macro body as a named sub-schema
+  `definitions/Macros`** (the `{calories,protein,carbs,fat}` shape), referenced by
+  `macrosPerServing` via `"$ref": "#/definitions/Macros"`; `POST /api/macros/compute` and
+  `POST /api/macros/estimate` validate their request/response macro bodies against it, and the
+  Ollama `format` for the macro estimator (D3) uses the same sub-schema — so the D1 `422` path
+  and every "schema-validated **macro** body" step has one authored schema, not a second
+  source of truth (3rd-review minor #3). SQL migrations for the **relational shape decided in D2/B1**:
   `users` stub; `recipes` (nullable `owner_id`, scalar fields, **per-serving macro columns
   cal/protein/carbs/fat, `total_weight_g`, `macro_source`, `macros_estimated`**); **child tables
   `recipe_ingredients`** (FK, `position`, nullable
@@ -472,17 +524,17 @@ addition, not a migration.
   `group_label` not the reserved word `group`; language-neutral unit vocabulary),
   **`recipe_steps`** (FK, `position`, `text`),
   **`recipe_images`** (FK, `position`, `url`); **join table `recipe_tags`** (FK, `tag`,
-  `position`) — all child/join FKs **`ON DELETE CASCADE`**; C++ model structs + jsoncpp
-  (de)serialization that **assemble/emit the canonical `Recipe` JSON from these tables**
-  (note the JSON↔column name maps, e.g. `macrosPerServing.calories` ↔ column `cal`) + a
-  **`valijson` validation function**. *Verify:* migrations apply on a fresh DB; unit test
-  round-trips a `Recipe` struct↔JSON (via the child tables) — including a **grouped,
-  to-taste-ingredient recipe** (null quantity/unit), ordered `steps`, an **empty-`steps`**
-  recipe, **`tags[]` + `images[]` with order preserved**, **and `macrosEstimated: true`
-  surviving the round-trip** — and `valijson` **rejects a schema-invalid document** and
-  accepts a valid one.
-- **T1.3** Recipe repository/service (create, read, list, update, delete) via Drogon
-  `DbClient` (`execSqlSync`) — writing/reading across the parent + child tables in a
+  `position`) — all child/join FKs **`ON DELETE CASCADE`**; C++ model structs + **our own JSON
+  (de)serialization (M0 `json`)** that **assemble/emit the canonical `Recipe` JSON from these
+  tables** (note the JSON↔column name maps, e.g. `macrosPerServing.calories` ↔ column `cal`) +
+  a validation function using the **M0 `jsonschema` validator**. *Verify:* migrations apply on
+  a fresh DB; unit test round-trips a `Recipe` struct↔JSON (via the child tables) — including a
+  **grouped, to-taste-ingredient recipe** (null quantity/unit), ordered `steps`, an
+  **empty-`steps`** recipe, **`tags[]` + `images[]` with order preserved**, **and
+  `macrosEstimated: true` surviving the round-trip** — and the validator **rejects a
+  schema-invalid document** and accepts a valid one.
+- **T1.3** Recipe repository/service (create, read, list, update, delete) via the **M0 `db`
+  lib** (parameterized `exec`) — writing/reading across the parent + child tables in a
   transaction; per-100 g derived computation. **Update (PUT) strategy (2nd-review blocker):
   a full-replace within one transaction** — the client PUTs the *complete* recipe (the M2
   form already holds every ingredient's `foodId`, so it round-trips them), and the service
@@ -553,9 +605,9 @@ addition, not a migration.
   and any **storage/reheating block → `notes`**. Steps may be absent (video-only).
   **UTF-8 handling per D4/B3: NFC-normalize the input first** (pasted captions may arrive
   NFD-decomposed, e.g. `ä` = `a`+U+0308, which would break whole-token matches for
-  `Eiweiß`/`Hähnchen` and codepoint-range emoji stripping — 2nd-review minor), then **use
-  RE2 (not `std::regex`), codepoint-range emoji/symbol stripping, and line-start-anchored
-  quantities** so `140ml … 7%` doesn't misread `7`. *Verify:* unit tests parse the three
+  `Eiweiß`/`Hähnchen` and codepoint-range emoji stripping — 2nd-review minor), then **our own
+  UTF-8 scanning (no `std::regex`, no regex engine), codepoint-range emoji/symbol stripping,
+  and line-start-anchored quantities** so `140ml … 7%` doesn't misread `7`. *Verify:* unit tests parse the three
   representative captions into the expected structured fields, including grouping,
   null-quantity rows, the extracted macro block, empty steps, **correct emoji/umlaut
   handling (`Eiweiß`, `Hähnchen`), an NFD-decomposed input variant, and the
@@ -565,7 +617,7 @@ addition, not a migration.
   validation; fallback on invalid). Documented fallback = on invalid/unparseable LLM JSON,
   return a **best-effort or empty draft into the editable preview with a warning** (no
   auto-retry, no silent save). *Verify:* unit test with the **fake `IHttpClient`** (no live
-  LLM, no real libcurl) asserts valid JSON is accepted and malformed JSON triggers that
+  LLM, no real network) asserts valid JSON is accepted and malformed JSON triggers that
   documented fallback — an empty/partial draft plus a warning flag, not an exception or a
   saved record.
 - **T3.3** Paste screen: textarea, engine toggle (rule-based / local LLM), parse →
@@ -616,7 +668,7 @@ addition, not a migration.
   filled recipe carries `macrosEstimated: true`**; the user can still override before save.
 
 ## Milestone 5 — Media, polish, search
-- **T5.1** Image upload endpoint (Drogon multipart → disk volume) + external-URL option
+- **T5.1** Image upload endpoint (**our own multipart/form-data parser, M0 `net`** → disk volume) + external-URL option
   (**store-only, no server-side fetch — M6b/SSRF**). Concrete validation per D6/M6:
   **server-generated filename** (UUID + extension, client filename ignored — no path
   traversal), **size ≤ 8 MB**, **content-type ∈ {jpeg,png,webp} verified by magic bytes**.
@@ -646,8 +698,8 @@ addition, not a migration.
 
 ## Milestone 6 — Deployment & docs
 - **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime), using a
-  **vcpkg binary cache (or a prebuilt-deps base image)** so Drogon's dependency tree isn't
-  recompiled every build (Q8) + Angular `ng build` static bundle served by nginx with a
+  **vcpkg binary cache (or a prebuilt-deps base image)** so libpq/OpenSSL aren't recompiled
+  every build (Q8) + Angular `ng build` static bundle served by nginx with a
   **`location /api/ { proxy_pass → backend }`** block **and a `location /uploads/`** block
   (same-origin in prod; nginx serves uploads — M6) + `docker-compose.yml` (backend,
   frontend, postgres volume; `LLM_BASE_URL` → external Ollama) + `.env.example`. *Verify:*
@@ -672,10 +724,24 @@ six milestones**. Remaining sign-off questions:_
    `owner_id`) now with **no auth implemented**, per D2/D6?
 2. **Scope:** all six milestones this phase, as laid out?
 
-_Stack is settled: Angular SPA + C++/Drogon backend + PostgreSQL._
+_Stack: Angular SPA + **from-scratch C++ backend (no framework — own HTTP server/router/JSON/
+schema/DB-over-libpq/HTTP-client; externals = libpq, OpenSSL, Catch2)** + PostgreSQL._
 
 ## Reviewer notes
 _(newest round first)_
+
+**From-scratch pivot (2026-08-24)** — after GATE 0 was passed, the human chose to **drop the
+Drogon framework and build the backend from sockets up** (own HTTP server/router/JSON/schema/
+DB-over-libpq/HTTP-client; externals shrink to libpq + OpenSSL + Catch2). This is a material
+change to the approved D1–D3 + milestones, so `approvals` were **reset to pending** and the
+plan re-opened. Revisions: D1 rewritten (own libraries, new `/lib` layout); D2 (own DB layer,
+own thread pool, own JSON + validator, vcpkg trimmed); D3 (own HTTP client on the `IHttpClient`
+seam, own validator); parser uses **own UTF-8 scanning, no RE2**; multipart is our own (M0
+`net`); build-cost note shrinks. **New Milestone 0 — Core backend libraries** (T0.1–T0.7:
+toolchain, `net`/HTTP server, `router`, `json`, `jsonschema`, `db`, `/health` wiring) inserted
+before M1; **M1 becomes "Schema, DB, browse API" on the M0 libs** (T1.1 = migration runner,
+T1.2–T1.4 unchanged in number). M2–M6 (Angular, paste, OFF, media, deploy) keep their numbers
+and all task references. Awaiting a fresh reviewer pass, then the human signature.
 
 **Round 12** (diff-only confirm on the 3rd-review fold-in): **APPROVE** — `macrosEstimated`
 verified consistent across format/D5/T4.2/T4.3/T2.1/D1; `definitions/Macros`, file-GC
