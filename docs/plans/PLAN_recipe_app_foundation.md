@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: pending      # rolled back 2026-08-24 — a deeper external review (2 independent passes) found 3 blocking gaps (storage shape, HTTP mock seam, UTF-8 parsing) the workflow reviewer missed; must be addressed + re-reviewed
+  reviewer: 2026-08-24   # re-APPROVED after the external-review fold-in (Round 8 confirm); rolled back once mid-session, see Reviewer notes
   human: pending      # date (YYYY-MM-DD) on human approval
 ---
 
@@ -551,6 +551,11 @@ _Stack is settled: Angular SPA + C++/Drogon backend + PostgreSQL._
 
 ## Reviewer notes
 _(newest round first)_
+
+**Round 8** (diff-only confirm on the Round 7 fixes): **APPROVE** — all six changes
+verified in place and consistent (food_id/foods sequencing, foodId/UUID, group_label,
+IHttpClient rename, T4.3 fake seam, DELETE endpoint), no new inconsistency. Reviewer
+signature stamped `2026-08-24`. **Human GATE 0 signature still pending.**
 
 **Round 7** (fresh full re-read after the Round 6 fold-in): reviewer **confirmed all B1–B3
 and M1–M6 / Q1–Q10 fixes present and sound**, but found **1 blocking + 5 non-blocking** —
