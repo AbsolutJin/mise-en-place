@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: pending      # 3rd external review = APPROVE-with-findings (0 blocking, 1 major, 8 minor); folding in then re-confirming before human sign-off
+  reviewer: 2026-08-24   # APPROVED (Round 12 confirm) after folding in all 3 external reviews; rolled back 3× mid-session, see Reviewer notes. Human signature is the only remaining GATE 0 step.
   human: pending      # date (YYYY-MM-DD) on human approval
 ---
 
@@ -69,7 +69,11 @@ addition, not a migration.
     timeout. **OFF-throttling behaviour for `/api/foods/search` (3rd-review minor #2):** if
     any **local candidate** exists → `200` + cached results + `warning`; otherwise propagate
     the upstream condition — OFF returned `429` → **`429`**; OFF unreachable → **`502`**;
-    OFF timeout → **`504`**. Mutations use the error envelope: **`PUT`/`DELETE` target
+    OFF timeout → **`504`**. **LLM unreachable/timeout** on `/api/parse` and
+    `/api/macros/estimate` is **not** a 5xx: it degrades to the **`200` + warning-draft**
+    path (the best-effort/empty editable draft of T3.2/T4.3), so a down LLM never blocks
+    entry (consistent with D6) — the T3.2/T4.3 "invalid output" fallback and transport
+    failure share this path. Mutations use the error envelope: **`PUT`/`DELETE` target
     `/api/recipes/:id`** (so the `404`-on-`:id` rule applies), and a successful **`DELETE`
     returns `204`**.
   - **List vs detail + pagination:** `GET /api/recipes` returns a **lightweight summary
@@ -451,10 +455,12 @@ addition, not a migration.
   migration leaves `schema_migrations` unchanged (that migration's transaction rolls back).
 - **T1.2** `Recipe` JSON Schema in `docs/` (source of truth — the **locked field list**
   above; authored to **JSON Schema Draft 7** with the matching `"$schema"`, the draft
-  valijson supports — Q4). **Also author the macro body as a named sub-schema `$defs/Macros`**
-  inside the same document (the `{calories,protein,carbs,fat}` shape), referenced by
-  `macrosPerServing`; `POST /api/macros/compute` and `POST /api/macros/estimate` validate
-  their request/response macro bodies against `$defs/Macros`, and the Ollama `format` for the
+  valijson supports — Q4). **Also author the macro body as a named sub-schema
+  `definitions/Macros`** (Draft-7's reusable-subschema keyword is `definitions`, not the
+  2019-09 `$defs`) inside the same document (the `{calories,protein,carbs,fat}` shape),
+  referenced by `macrosPerServing` via `"$ref": "#/definitions/Macros"`; `POST
+  /api/macros/compute` and `POST /api/macros/estimate` validate their request/response macro
+  bodies against it, and the Ollama `format` for the
   macro estimator (D3) uses the same sub-schema — so the D1 `422` path and every
   "schema-validated **macro** body" step has one authored schema, not a second source of
   truth (3rd-review minor #3). SQL migrations for the **relational shape decided in D2/B1**:
@@ -671,6 +677,13 @@ _Stack is settled: Angular SPA + C++/Drogon backend + PostgreSQL._
 ## Reviewer notes
 _(newest round first)_
 
+**Round 12** (diff-only confirm on the 3rd-review fold-in): **APPROVE** — `macrosEstimated`
+verified consistent across format/D5/T4.2/T4.3/T2.1/D1; `definitions/Macros`, file-GC
+ordering, warning envelope, clamp, and recompute rule all sound. Two non-blocking notes
+(LLM-unreachable status; `$defs`→`definitions` Draft-7 idiom) **also folded in**. Reviewer
+signature stamped `2026-08-24`. **Human GATE 0 signature is the only remaining step** — the
+3rd external review named this the exit point.
+
 **3rd external review** (`docs/reviews/PLAN_REVIEW_2026-08-24_external-3.md`, two passes,
 over the Round-10 plan): **APPROVE with findings — 0 blocking** (first time in the chain), 1
 major, 8 minor. It confirms the loop has converged (R1 3 blocking+6 major → R2 1 blocking+5
@@ -685,7 +698,7 @@ fold in; all findings addressed:
   `{data,warning{code,message}}` for all three degradation flows.
 - _Minor #2 429-vs-502 ambiguous_ → D1 disambiguates (cached→200+warning; else 429/502/504
   by upstream condition).
-- _Minor #3 macro-body schema never authored_ → T1.2 authors **`$defs/Macros`** in the same
+- _Minor #3 macro-body schema never authored_ → T1.2 authors **`definitions/Macros`** in the same
   Draft-7 doc; compute/estimate + Ollama `format` validate against it.
 - _Minor #4 list didn't render the flag its projection carries_ → T2.1 renders the estimated
   marker on the list too.
