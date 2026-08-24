@@ -1,138 +1,111 @@
 # mise-en-place — Roadmap
 
-A human-readable, checkable progress tracker for the recipe app. The **spec** lives in
-`docs/plans/PLAN_recipe_app_foundation.md` (approved); this file is the **progress view** —
-tick a box when that step is done and verified.
+A human-readable, checkable progress tracker. The **spec** is
+`docs/plans/PLAN_recipe_app_foundation.md`; this is the **progress view** — tick a box when a
+step is done and verified.
 
 **How to use:** `[ ]` = not started · `[~]` = in progress · `[x]` = done & verified.
 A task is **done** only when its code is written, its **"Done when"** check passes, and the
-change is committed. Milestones close after a `workflow:review` pass at the boundary.
+change is committed. Milestones close after a `workflow:review` at the boundary.
 
-**Status:** ✅ Planning complete (GATE 0 passed 2026-08-24) · ⏳ Implementation not started.
+**Status (2026-08-24):** ⏳ **Planning — GATE 0 NOT yet passed.** The plan is
+**reviewer-approved** (`approvals.reviewer: 2026-08-24`) but the **human signature is pending**
+(`approvals.human: pending`, `status: draft`). Five external reviews + the internal reviewer
+have been folded in; the backend was pivoted to **from-scratch (no framework, no vcpkg)**.
+**No implementation has started.**
 
-Legend for the pills below: 🟢 done · 🟡 in progress · ⚪ not started.
-
----
-
-## Phase 0 — Planning ✅ (complete)
-
-- [x] **Understand** — intent + repo context gathered
-- [x] **Plan written** — `docs/plans/PLAN_recipe_app_foundation.md`
-- [x] **Recipe format + scope locked** — field list, browse/search scope, parser depth, LLM policy, milestone order
-- [x] **Reviewer approval** — `approvals.reviewer: 2026-08-24`
-- [x] **3 external reviews folded in** — converged 3→1→0 blocking (`docs/reviews/`)
-- [x] **Human GATE 0 approval** — `approvals.human: 2026-08-24`, `status: approved`
+> ⚠️ Do not begin coding until the human signs GATE 0. The stack is: **from-scratch C++
+> backend** (own HTTP server/router/JSON/schema/DB-over-libpq/HTTP-client), Angular SPA,
+> PostgreSQL; externals via **system apt** (libpq, OpenSSL, utf8proc, Catch2 — **no vcpkg**);
+> dev in **WSL2**.
 
 ---
 
-## Milestone 1 — Backend scaffold, schema, DB, browse API ⚪
+## Phase 0 — Planning ⏳ (GATE 0 pending)
 
-- [ ] **T1.1 — Toolchain + Drogon skeleton + migration runner**
-  - **Dev env: WSL2 (Ubuntu)** — set up the toolchain inside WSL (matches the Linux/Docker
-    deploy target); keep the repo in the WSL filesystem (`~/dev/...`), not `/mnt/e/...`
-  - Build: CMake + `vcpkg.json` (`drogon[postgres]`, `valijson`, `libcurl`, `re2`, Catch2)
-  - `/health` endpoint; Postgres connection from env; `setThreadNum` sized
-  - Migration runner: version-tracking, per-migration transaction, session `pg_advisory_lock` on one dedicated connection
-  - Dev `docker-compose` with a Postgres service
-  - **Done when:** `cmake --build` succeeds; app boots; `GET /health` → 200; logs show DB connect; re-run does not re-apply migrations; a failing migration leaves `schema_migrations` unchanged
-- [ ] **T1.2 — `Recipe` JSON Schema + SQL migrations + model round-trip**
-  - Draft-7 schema in `docs/` (single source of truth) + `definitions/Macros` sub-schema
-  - Relational tables: `recipes` (+ macro cols, `macros_estimated`), `recipe_ingredients`, `recipe_steps`, `recipe_images`, `recipe_tags` — all child FKs `ON DELETE CASCADE`
-  - C++ structs + jsoncpp assemble/emit canonical JSON + `valijson` validation
-  - **Done when:** migrations apply on a fresh DB; round-trip test passes for a grouped/to-taste recipe, ordered + empty steps, tags/images order preserved, `macrosEstimated` surviving; valijson rejects invalid & accepts valid
-- [ ] **T1.3 — Recipe repository/service (CRUD) + PUT full-replace**
-  - CRUD across parent + child tables in a transaction; per-100 g derived
-  - PUT = full-replace (client sends complete recipe; `food_id` picks survive; `position` reassigned; recompute `macrosEstimated`); image-file GC ordering (read names → delete → unlink)
-  - **Done when:** integration tests (dedicated test Postgres, truncate per test) pass for CRUD, a PUT edit preserving picks + reordering, and the per-100 g "no weight → null" path
-- [ ] **T1.4 — Browse controllers + seed**
-  - `GET /api/recipes` (paginated summary projection) + `GET /api/recipes/:id` (full); seed 2–3 recipes with `food_id` null
-  - **Done when:** integration test — list honors `limit`/`offset`, `/:id` returns schema-valid full `Recipe`
-- [ ] **🚦 M1 review** — `workflow:review` at the milestone boundary passes
+- [x] Understand — intent + repo context
+- [x] Plan written — `docs/plans/PLAN_recipe_app_foundation.md`
+- [x] Recipe format + product scope locked
+- [x] **Five external reviews** folded in (`docs/reviews/`) — incl. the from-scratch pivot,
+      the vcpkg drop, and the M0-security pass
+- [x] Reviewer approval (`approvals.reviewer: 2026-08-24`)
+- [ ] **Human GATE 0 signature** — auth-ready-no-auth · seven milestones (M0+M1–M6) · TLS
+      caveat · **freeze D1** _(← the only remaining planning step)_
+
+---
+
+## Milestone 0 — Core backend libraries (from scratch) ⚪
+
+- [ ] **T0.1 — Toolchain + skeleton** — CMake (C++20) finding apt `libpq-dev`/`libssl-dev`/`libutf8proc-dev`/`catch2`; `/lib` (`net router json jsonschema db httpclient`) + `/app` + `/tests`; **ASAN+UBSAN (+TSan) build**; dev `docker-compose` Postgres. WSL2. **Done when:** build succeeds; a Catch2 test runs green under ASAN+UBSAN; the dev Postgres comes up.
+- [ ] **T0.2 — `net` (HTTP/1.1 server)** — socket listener, request parser (CL + chunked), response writer, keep-alive, thread pool; hardening: size caps, timeout (anti-slowloris), **anti-smuggling framing** (CL+TE, dup CL, bare CR/LF/NUL, overflow); **fuzz harness**. **Done when:** malformed/smuggling vectors → 400; oversized/chunked-over-cap rejected not OOM'd; stalled conn times out; fuzzer clean for a budget.
+- [ ] **T0.3 — `router`** — method+path (`:id` params) → handler; 404/405; error + warning envelope helpers. **Done when:** routing/param/404/405 tests + envelope-shaped error body pass.
+- [ ] **T0.4 — `json`** — own parser+serializer (unicode escapes incl. **surrogate pairs**, numbers, bool/null), **recursion-depth cap**; **fuzz harness**. **Done when:** round-trips (incl. surrogate pairs) pass; malformed → clean error; past-cap depth rejected; fuzzer clean.
+- [ ] **T0.5 — `jsonschema`** — own validator for the authored subset (types/enum/required/arrays/**`type:[…,"null"]` union**/`$ref`), reports the failing path; tested against a **generic fixture schema** (real Recipe schema is T1.2). **Done when:** valid fixture accepted; each violation class (+ null in non-nullable) rejected with path; null accepted in a nullable field.
+- [ ] **T0.6 — `db` (libpq)** — connection pool, **parameterized `exec`**, result→row mapping, transaction helper, standalone `connect()` for the migration lock, and a **migration-only raw `PQexec`** path. **Done when:** parameterized round-trip; SQL-metachar bind stored literally; pool concurrency; standalone connect works.
+- [ ] **T0.7 — App wiring + `/health`** — `main()` starts server, mounts router, builds db pool from env, logging + config. **Done when:** app boots; `GET /health` → 200 through our server; DB connect logged.
+- [ ] **T0.8 — `httpclient`** — own HTTP/1.1 client; chunked decode; body cap; **HTTPS via OpenSSL with HOSTNAME verification (`SSL_set1_host` + `X509_V_OK`)** for OFF, plain HTTP for Ollama; timeouts. **Done when (real network):** HTTPS GET verified; **valid-CA-wrong-hostname rejected**; plain-HTTP local GET; chunked decode; fake stays the unit double.
+- [ ] **🚦 M0 review** — boundary review passes _(largest + most security-exposed part — read carefully)._
+
+---
+
+## Milestone 1 — Schema, DB, browse API (on the M0 libs) ⚪
+
+- [ ] **T1.1 — Migration runner** — `schema_migrations`, per-migration transaction, session advisory lock on the dedicated connection. **Done when:** applies on boot; no re-apply; a failing migration rolls back cleanly.
+- [ ] **T1.2 — `Recipe` schema + migrations + model round-trip** — authored schema (+ `definitions/Macros`); relational tables (child tables + `recipe_tags`, `ON DELETE CASCADE`, `macros_estimated` col); own JSON assembly + validator. **Done when:** migrations apply; round-trip covers grouped/to-taste/ordered+empty steps/tags+images order/`macrosEstimated`; validator rejects invalid.
+- [ ] **T1.3 — Repository/service (CRUD) + PUT full-replace** — food_id picks survive; `macrosEstimated` recompute except when `macroSource=manual`; image-file GC ordering. **Done when:** CRUD + PUT-preserves-picks + per-100g null-path integration tests pass.
+- [ ] **T1.4 — Browse controllers + seed** — `GET /api/recipes` (paginated summary) + `/:id` (full); seed with `food_id` null. **Done when:** list honors limit/offset; `/:id` returns schema-valid full Recipe.
+- [ ] **🚦 M1 review**
 
 ---
 
 ## Milestone 2 — Frontend scaffold, browse/detail, structured form ⚪
 
-- [ ] **T2.0 — UI mockups (design before build)**
-  - Mock the key screens in `docs/mockups/` (see its README): browse/list + search bar,
-    recipe detail (macro tables, `—`/estimated states, `macroSource` badge), add/edit form
-    (dynamic ingredient rows), paste import (editable preview), OFF search-and-pick, and
-    the empty/error/warning states
-  - **Done when:** each screen in the mockups checklist has an agreed mock and the layout/
-    controls are settled — so T2.1–T2.3 build against a decided design, not ad-hoc
-- [ ] **T2.1 — Angular scaffold + browse/detail**
-  - Exact-pinned Angular; dev `proxy.conf.json`; typed API service coding against the error envelope; browse list (paginated summaries) + detail (macros, `macrosEstimated` marker on list & detail, `macroSource` badge)
-  - **Done when:** `ng build` passes; `ng test` green (ChromeHeadlessNoSandbox); list + a detail render a seeded recipe with both macro columns
-- [ ] **T2.2 — Add/Edit form + DELETE**
-  - Reactive Forms (dynamic ingredient `FormArray`, steps, images, macros) → `POST`/`PUT /api/recipes/:id`; server-side validation (422 + envelope); `DELETE /api/recipes/:id` (→ 204) with UI confirm
-  - **Done when:** valid submit persists & shows in browse; schema-invalid POST → 422 envelope; PUT preserves picked `food_id`s; delete removes recipe + child rows
-- [ ] **T2.3 — Manual macro entry + override**
-  - Wired into the form (no nutrition DB yet)
-  - **Done when:** manually entered macros persist & render both columns; per-100 g shows "—" with no weight
-- [ ] **🚦 M2 review** — boundary review passes _(M1+M2 = first end-to-end vertical slice)_
+- [ ] **T2.0 — UI mockups** (`docs/mockups/`) — screens + states agreed before build.
+- [ ] **T2.1 — Angular scaffold + browse/detail** — exact-pinned Angular; dev proxy; typed API service on the error envelope; browse (paginated summaries) + detail (macros, `—`/estimated marker, `macroSource` badge, tags/favorite/notes/times, ingredient notes). **Done when:** `ng build`/`ng test` green; list+detail render a seeded recipe.
+- [ ] **T2.2 — Add/Edit form + DELETE** — Reactive Forms incl. **tags/favorite/notes/times** (the only way they're set); `POST`/`PUT /api/recipes/:id`; `DELETE …/:id`→204. **Done when:** save persists; tags+favorite round-trip and are found by T5.2 filters; 422 on invalid; PUT preserves picks; delete cascades.
+- [ ] **T2.3 — Manual macro entry + override.** **Done when:** manual macros persist + render; per-100g "—" with no weight.
+- [ ] **🚦 M2 review** _(M1+M2 = first end-to-end vertical slice)_
 
 ---
 
 ## Milestone 3 — Paste import with selectable engine ⚪
 
-- [ ] **T3.1 — `RecipeParser` + `RuleBasedParser` + `POST /api/parse`**
-  - Social captions only; primary offline engine; NFC-normalize → RE2, codepoint emoji stripping, line-anchored quantities; sections→group, qty/unit, macro block, to-taste rows, parenthetical→note, storage→notes
-  - **Done when:** unit tests parse the 3 fixtures (grouping, null-qty rows, macro block, empty steps, `Eiweiß`/`Hähnchen`, an NFD variant, the `7%`-not-a-quantity case)
-- [ ] **T3.2 — `LlmClient` + `LlmParser` (fallback engine)**
-  - On the `IHttpClient` seam; Ollama native `/api/chat` `format`=schema (OpenAI fallback); validate + graceful fallback (empty/partial draft + warning)
-  - **Done when:** unit test with fake `IHttpClient` — valid JSON accepted; malformed → documented fallback (draft + warning, no exception/save)
-- [ ] **T3.3 — Paste screen**
-  - Textarea + engine toggle → parse → editable preview (reuses M2 form) → save
-  - **Done when:** pasting a sample (rule-based) yields a pre-filled, editable, saveable form
-- [ ] **🚦 M3 review** — boundary review passes
+- [ ] **T3.1 — `RuleBasedParser` + `POST /api/parse`** — social captions; **utf8proc NFC** then own UTF-8 scanning; sections/qty-unit/macro block/to-taste/parenthetical→note; **`/api/parse` returns a partial draft, never 422**. **Done when:** 3 fixtures parse (grouping, null-qty, macro block, empty steps, umlaut/NFD, `7%` trap); partial caption → draft+warning.
+- [ ] **T3.2 — `LlmClient` + `LlmParser` (fallback)** — on `IHttpClient` (T0.8); Ollama native `/api/chat format=schema`; invalid → empty/partial draft + warning. **Done when:** fake-client test: valid accepted, malformed → documented fallback.
+- [ ] **T3.3 — Paste screen** — textarea + engine toggle → editable preview → save. **Done when:** rule-based paste yields a pre-filled saveable form.
+- [ ] **🚦 M3 review**
 
 ---
 
-## Milestone 4 — Macros from Open Food Facts (search & pick) + LLM estimate ⚪
+## Milestone 4 — Macros from Open Food Facts + LLM estimate ⚪
 
-- [ ] **T4.1 — `NutritionSource` + OFF client + `foods` cache + converter**
-  - OFF API v2 `/api/v2/search` (verify live rate limits first), UA, 429/backoff, on `IHttpClient` seam; `foods` table (UUID `id` PK, `code` UNIQUE) + FK add onto `food_id`; local-first search; per-100 g mapping (kcal, else ÷4.184); unit→gram (density + piece/spoon tables)
-  - **Done when:** fake-`IHttpClient` test returns candidates; already-picked food resolves with no API call; kJ-only mock converted/rejected; unit-conversion tests incl. piece/spoon + "no table entry → flagged"
-- [ ] **T4.2 — Macro engine**
-  - Sum `quantity × per-100 g` → per-serving + per-100 g; unpicked/missing/unresolvable surfaced (never zeroed) → per-100 g "—"; sets `macrosEstimated` when piece/spoon fed the math
-  - **Done when:** exact-grams recipe matches hand-computed values (`estimated:false`); piece/spoon recipe computes full weight (`estimated:true`); flagged-ingredient recipe → "—"
-- [ ] **T4.2b — `POST /api/macros/compute` + search-and-pick UI**
-  - Per ingredient: search → candidates (prefer complete nutriments) → pick → macros fill; wired into the M2 form
-  - **Done when:** in-form search lists candidates, picking fills macros, per-serving + per-100 g compute when all picked/resolved
-- [ ] **T4.3 — `POST /api/macros/estimate` + LLM-estimate button**
-  - `LlmMacroEstimator` (on the seam; validates against `definitions/Macros`); sets `macrosEstimated: true`
-  - **Done when:** fake-LLM test fills macro fields & asserts `macrosEstimated: true`; user can override before save
-- [ ] **🚦 M4 review** — boundary review passes
+- [ ] **T4.1 — `NutritionSource` + OFF client + `foods` cache + converter** — OFF v2 `/api/v2/search` (verify limits) on T0.8 HTTPS; `foods` (UUID id PK, code UNIQUE) + FK add; local-first; per-100g mapping; unit→gram (density + piece/spoon tables). **Done when:** fake-client candidates; cache hit → no call; kJ-only converted/rejected; unit + piece/spoon conversions incl. flagged path.
+- [ ] **T4.2 — Macro engine** — sum → per-serving + per-100g; unpicked/flagged → "—"; sets `macrosEstimated` when piece/spoon fed it. **Done when:** exact-grams matches hand-computed (`estimated:false`); piece/spoon full weight (`estimated:true`); flagged → "—".
+- [ ] **T4.2b — `POST /api/macros/compute` + search-and-pick UI** — sets `macroSource:"ingredients"`. **Done when:** in-form search→pick→fill; compute correct + provenance set.
+- [ ] **T4.3 — `POST /api/macros/estimate` + LLM button** — sets `macroSource:"llm"` + `macrosEstimated:true`. **Done when:** fake-LLM fills + asserts provenance; user can override.
+- [ ] **🚦 M4 review**
 
 ---
 
 ## Milestone 5 — Media, polish, search ⚪
 
-- [ ] **T5.1 — Image upload + lifecycle**
-  - Multipart → disk; server-generated filename, ≤8 MB, magic-byte type check; external URL store-only (no fetch/SSRF); owned files GC'd on delete + PUT diff
-  - **Done when:** valid upload attaches/renders; oversized/wrong-type/path-traversal rejected; external URL never fetched; delete/PUT removes owned files, external untouched
-- [ ] **T5.2 — Browse search / filter / sort**
-  - Title search (German-aware case-insensitive); tag AND-filter; favorites toggle; `minProtein`+`maxCalories`; sort newest/title/protein; on the paginated list (hard-clamped `limit`)
-  - **Done when:** search tests return expected subsets (incl. umlaut/ß case); each sort order confirmed; `limit`/`offset` paginate; over-max `limit` clamped
-- [ ] **🚦 M5 review** — boundary review passes
+- [ ] **T5.1 — Image upload + lifecycle** — adds a multipart parser into `net`; server-gen filename, ≤8 MB **enforced during streaming**, magic-byte type; external URL store-only (no SSRF); owned-file GC on delete/PUT. **Done when:** valid upload renders; oversized/wrong-type/traversal rejected; external never fetched; delete/PUT unlinks owned files.
+- [ ] **T5.2 — Search / filter / sort** — case-insensitive `ILIKE` (UTF-8 locale, no accent-fold, no extension); tag AND-filter; favorites; minProtein/maxCalories; sort; on the clamped paginated list. **Done when:** subset tests (incl. `Ä`↔`ä`, accent-fold-NOT-applied control), sorts, and limit-clamp pass.
+- [ ] **🚦 M5 review**
 
 ---
 
 ## Milestone 6 — Deployment & docs ⚪
 
-- [ ] **T6.1 — Docker + nginx + compose**
-  - Multi-stage backend Dockerfile (vcpkg binary cache); Angular static bundle via nginx (`/api` proxy + `/uploads`); `docker-compose.yml` (backend, frontend, postgres volume; `LLM_BASE_URL`); `.env.example`
-  - **Done when:** `docker compose up` builds & serves; browse works against a persisted volume; `/api/*` and `/uploads/*` reachable through nginx
-- [ ] **T6.2 — Docs**
-  - Env vars, Ollama pointer (verify exact pull tag), Postgres backup, C++/vcpkg + Angular build notes, min build RAM
-  - **Done when:** the copy-pasteable sequence works: `docker compose up` → `curl /health` 200 → POST a recipe → it appears in `GET /api/recipes`
-- [ ] **🚦 M6 review** — boundary review passes
+- [ ] **T6.1 — Docker + nginx + compose** — multi-stage Dockerfile on a **digest-pinned base**; build stage apt-installs deps; slim runtime ships `libpq5`/`libssl`/`libutf8proc`/`ca-certificates`; Postgres init with a **UTF-8 locale**; nginx `/api` + `/uploads` + `/health`; shared `uploads` volume across backend+nginx. **Done when:** `compose up` serves; browse persists; `/api/*`,`/uploads/*`,`/health` reachable; backend-written image served by nginx; in-container OFF search works (CA trust).
+- [ ] **T6.2 — Docs** — env vars, Ollama pointer (verify pull tag), backup, exact apt list + digest, min build RAM, "Docker build is the source of truth". **Done when:** copy-pasteable sequence works: `compose up` → `curl …/health` 200 → POST a recipe → appears in list.
+- [ ] **🚦 M6 review**
 
 ---
 
 ## Definition of done (whole phase)
 
-- [ ] All six milestones complete, each with its boundary review passed
+- [ ] All seven milestones complete (M0 + M1–M6), each with its boundary review passed
 - [ ] `docker compose up` runs the full app on a home server / VPS behind VPN or basic-auth **over TLS**
 - [ ] Docs let a fresh setup reach a working app from scratch
 - [ ] Plan + reviews archived to `docs/archive/` (per `docs/archive/README.md`)

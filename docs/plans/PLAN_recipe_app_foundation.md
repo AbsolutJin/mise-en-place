@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: 2026-08-24   # re-APPROVED after folding all 4 external reviews + from-scratch pivot + vcpkg drop. Human signature is the only remaining GATE 0 step.
+  reviewer: pending      # REOPENED 2026-08-24 — 5th external review (targets the new from-scratch M0) found 2 security blockers (TLS hostname verification; no sanitizers/fuzzing) + process/technical majors. Folding in, then re-confirm.
   human: pending      # was 2026-08-24; reset on the from-scratch pivot, awaiting re-signature
 ---
 
@@ -19,7 +19,8 @@ instead. Paste-parsing and macro-estimation each offer a **user-selectable engin
 rule-based or a local LLM** (HTTP API, e.g. Ollama).
 
 This plan covers the **product foundation** (all core features end-to-end) across
-six milestones. It is the first workflow phase; later phases (advanced search,
+**seven milestones (M0 core libraries + M1–M6)** — M0 was added by the from-scratch pivot
+(D1). It is the first workflow phase; later phases (advanced search,
 tagging, meal planning, authentication, and **website-text / URL import** — see D4)
 are out of scope here — but the schema is built **auth-ready** so auth is a later
 addition, not a migration.
@@ -57,9 +58,12 @@ addition, not a migration.
     hand-rolling full NFC needs Unicode tables, so we take this one small lib; 4th-review Major),
     and a **test framework** (Catch2). Everything else is ours.
     **No vcpkg** — the human chose system packages, knowingly trading vcpkg's reproducible,
-    checked-in version pinning for a simpler, dependency-manager-free build; reproducibility
-    instead rests on **pinned base-image / distro versions** in the Dockerfile (T6.1) and a
-    documented `apt install` list (T6.2). CMake finds the libs via `find_package`/`pkg-config`.
+    checked-in version pinning for a simpler, dependency-manager-free build. **This is only
+    "reproducible within a distro-release window," not exactly reproducible (5th-review T1):**
+    a Docker *tag* is a mutable pointer and `apt install` (unpinned) pulls whatever the mirror
+    serves. Minimum honest hardening: **pin the base image by digest (`FROM debian@sha256:…`),
+    not tag** (T6.1) + a documented `apt` list (T6.2); optionally pin apt versions against
+    `snapshot.debian.org`. CMake finds the libs via `find_package`/`pkg-config`.
 - **Frontend:** **Angular SPA** (Angular CLI, `ng build` → static bundle), served as
   static files; it calls the backend over HTTP at `/api/*`. Chosen to learn a robust,
   structured framework; its **Reactive Forms** suit the dynamic ingredient-row form and
@@ -73,8 +77,8 @@ addition, not a migration.
   the own HTTP layer adds the CORS response headers.
 - **Monorepo layout:**
   ```
-  /backend    C++ from-scratch API (CMake; libpq/OpenSSL/Catch2 via system apt packages)
-    /lib          our libraries: /net (sockets+http server) /router /json /db /httpclient
+  /backend    C++ from-scratch API (CMake; libpq/OpenSSL/utf8proc/Catch2 via system apt packages)
+    /lib          our libraries: /net (sockets+http server) /router /json /jsonschema /db /httpclient
     /app          /controllers  /models  /services  /migrations
     /tests
   /frontend   Angular SPA
@@ -140,9 +144,11 @@ addition, not a migration.
 - **JSON + schema validation are OURS (D1):** own parser/serializer, and own validation of
   the `Recipe`/`Macros` schema. The schema in `docs/` stays the single source of truth, but
   since we validate it ourselves we are **not bound to a library's supported draft** — we
-  author it to a clear, self-consistent subset (object/array/string/number/enum/required/
-  nullable + `definitions/Macros` via `$ref`) and our validator implements exactly that
-  subset. This backs every "schema-validated" step (T2.x, T3.2, T4.3). (Supersedes the old
+  author it to a clear, self-consistent subset: object/array/string/number/enum/required, and
+  **nullability expressed as a `"type":[…,"null"]` union — NOT a `nullable` keyword** (that's
+  OpenAPI, not JSON-Schema; an unknown keyword would silently under-validate the many nullable
+  fields — 5th-review T3) + `definitions/Macros` via `$ref`. Our validator implements exactly
+  that subset. This backs every "schema-validated" step (T2.x, T3.2, T4.3). (Supersedes the old
   valijson/Draft-7 constraint.)
 - **Migrations:** plain **SQL files** in `/backend/migrations`, applied by a small
   **version-tracking runner** on startup that records applied versions in a
@@ -476,37 +482,60 @@ addition, not a migration.
 > New milestone from the 2026-08-24 from-scratch pivot (D1). Builds the plumbing a framework
 > would have given us, so later milestones have libraries to stand on. Everything here is
 > unit-tested in isolation; no recipe logic yet.
-- **T0.1** Toolchain + project skeleton: **CMake** finding the **system (apt) packages**
-  `libpq-dev`, `libssl-dev`, `libutf8proc-dev`, `catch2`/`libcatch2-dev` via
-  `find_package`/`pkg-config` (no vcpkg, no framework) + the `/backend/lib` + `/app` +
-  `/tests` layout (D1) + a Catch2 test target. Dev happens in **WSL2 (Ubuntu)**. *Verify:*
-  `cmake --build` succeeds; a trivial Catch2 test runs green.
+- **T0.1** Toolchain + project skeleton: **CMake** (pin **C++20** — 5th-review minor, one
+  standard not "C++17/20") finding the **system (apt) packages** `libpq-dev`, `libssl-dev`,
+  `libutf8proc-dev`, `catch2`/`libcatch2-dev` via `find_package`/`pkg-config` (no vcpkg, no
+  framework) + the `/backend/lib` (`/net /router /json /jsonschema /db /httpclient`) + `/app`
+  + `/tests` layout (D1) + a Catch2 test target. **An `ASAN+UBSAN` build config
+  (`-fsanitize=address,undefined`) the Catch2 suite runs under (5th-review S2 — the #1 safety
+  net for hand-rolling four untrusted-input parsers), plus TSan coverage for the T0.6 pool.**
+  Also **stand up the dev `docker-compose` Postgres service here** (moved earlier so all of M0
+  can talk to a DB — 5th-review P3). Dev happens in **WSL2 (Ubuntu)**. *Verify:* `cmake
+  --build` succeeds; a trivial Catch2 test runs green **under ASAN+UBSAN**; the dev Postgres
+  container comes up.
 - **T0.2** `net` — TCP socket listener + **HTTP/1.1 request parser** (request line, headers,
   body via `Content-Length` **and** chunked) + response writer + keep-alive + a **thread
   pool** (D2). Hardening: cap header size / count **and total body size (enforced *during*
   chunked decode too, where there is no upfront `Content-Length`)**; reject malformed with
-  `400`; a **socket read/idle timeout** so a slow/stalled client (slowloris-style) cannot pin
-  a pool worker indefinitely. *Verify:* unit tests parse well-formed and malformed requests
-  (partial, oversized headers, bad `Content-Length`); an integration test makes a real
-  localhost request and gets the expected response; oversized body/headers (incl. a chunked
-  body exceeding the cap) are rejected, not OOM'd; a stalled connection is closed on timeout,
-  freeing its worker.
+  `400`; a **socket read/idle timeout** (anti-slowloris). **RFC 7230 §3.3.3 framing / anti-
+  smuggling (5th-review T2):** reject **both `Content-Length` and `Transfer-Encoding` present**,
+  reject **duplicate/conflicting `Content-Length`**, accept only `Transfer-Encoding: chunked`
+  (else `400/501`), **overflow-check** chunk-size hex and `Content-Length`, and reject **bare
+  CR / bare LF / embedded NUL** in the request line and headers. **Fuzz the parser (5th-review
+  S2):** a libFuzzer/AFL++ harness on the HTTP parser is part of this task. *Verify:* unit
+  tests parse well-formed and malformed requests (partial, oversized headers, bad
+  `Content-Length`, **CL+TE both present, duplicate CL, oversized chunk-size, bare CR/LF**); an
+  integration test makes a real localhost request; oversized body/headers (incl. a chunked
+  body over the cap) are rejected, not OOM'd; a stalled connection is closed on timeout; **the
+  fuzz harness runs clean for a set budget**.
 - **T0.3** `router` + request/response abstraction: `method + path` (with `:id` params) →
   handler; unknown path → `404`, wrong method → `405`; the **error envelope + warning
   envelope** helpers (D1). *Verify:* routing tests incl. `:id` extraction, `404`/`405`, and
   an envelope-shaped error body.
-- **T0.4** `json` — own parser + serializer (objects, arrays, strings **with unicode
-  escapes**, numbers, `true`/`false`/`null`), round-tripping to a small DOM/value type.
-  *Verify:* round-trip tests incl. nested structures, unicode escapes, big/edge numbers, and
-  malformed input → a clear parse error (never a crash).
+- **T0.4** `json` — own parser + serializer (objects, arrays, strings **with unicode escapes
+  incl. `\uXXXX` surrogate pairs combined into U+10000+ code points — 5th-review T3**, numbers,
+  `true`/`false`/`null`), round-tripping to a small DOM/value type, with a **recursion-depth
+  cap** so a deeply nested body (from OFF/LLM) can't stack-overflow (DoS). **Fuzz the parser
+  (5th-review S2):** a libFuzzer/AFL++ harness is part of this task. *Verify:* round-trip tests
+  incl. nested structures, unicode escapes, **surrogate pairs**, big/edge numbers; malformed
+  input → a clear parse error (never a crash); a **past-cap nesting depth is rejected**, not a
+  crash; **the fuzz harness runs clean for a set budget**.
 - **T0.5** `jsonschema` — own validator for the **authored subset** the app uses (types,
-  `required`, `enum`, nullable, arrays, and `$ref` to `#/definitions/Macros`), reporting the
-  failing path. *Verify:* accepts a valid `Recipe` and a valid `Macros` body; rejects each
-  violation class (wrong type, missing required, bad enum, bad `$ref` target) with the path.
+  `required`, `enum`, arrays, **nullability as a `"type":[…,"null"]` union — NOT a `nullable`
+  keyword, which is OpenAPI, not JSON-Schema, and would silently under-validate; 5th-review
+  T3**, and `$ref` to `#/definitions/Macros`), reporting the failing path. Test against a
+  **generic fixture schema authored inline in M0** (types/enum/required/`$ref`) — the real
+  `Recipe`/`Macros` schema is authored later in T1.2, so M0 must not depend on it (5th-review
+  P3). *Verify:* accepts a valid fixture doc; rejects each violation class (wrong type, missing
+  required, bad enum, bad `$ref` target, **`null` in a non-nullable field**) with the path, and
+  **accepts `null` in a `[…,"null"]` field**.
 - **T0.6** `db` — libpq wrapper: a **connection pool**, **parameterized `exec`** (`$1,$2…`
   binds — SQL is never string-concatenated), result→row mapping, and a transaction helper;
   plus a **standalone (non-pooled) `connect()`** the migration runner (T1.1) uses to hold its
-  advisory lock on one dedicated connection (D2). *Verify:* against a dev Postgres, a
+  advisory lock on one dedicated connection (D2); plus a **raw `PQexec` path documented as
+  migration-only, never for user input** (migration files are multi-statement, which
+  parameterized `PQexecParams` can't run — developer-authored SQL, so no injection concern;
+  5th-review minor). *Verify:* against a dev Postgres, a
   parameterized round-trip returns rows; a value containing SQL metacharacters passed as a
   **bind** is stored/returned literally (injection inert); the pool hands out and returns
   connections under concurrent use; a standalone connection can be opened outside the pool.
@@ -517,12 +546,21 @@ addition, not a migration.
 - **T0.8** `httpclient` — the **own HTTP/1.1 client** that fulfills the `IHttpClient` seam
   (D3), used by the LLM + OFF clients (T3.2/T4.1/T4.3). Scope: connect over sockets; write an
   HTTP/1.1 request; read the response incl. **chunked-transfer decode**; response body-size
-  cap; **HTTPS via OpenSSL with certificate verification ON + SNI** (OFF is public-internet),
-  and **plain HTTP** for the local Ollama path; a read/connect **timeout**. *Verify (real
-  network, kept out of the default unit suite):* an HTTPS `GET` to a known good host succeeds
-  and its cert is verified; a host with an **invalid/mismatched cert is rejected**, not
-  silently accepted; a **plain-HTTP** GET to a local test server works; a chunked response
-  decodes correctly; the fake `IHttpClient` remains what the T3.2/T4.1/T4.3 unit tests use.
+  cap; **HTTPS via OpenSSL** for OFF (public internet); **plain HTTP** for the local Ollama
+  path; a read/connect **timeout**.
+  - **TLS must verify the HOSTNAME, not just the chain (5th-review S1 — critical):**
+    `SSL_VERIFY_PEER` alone checks only the certificate *chain*; **SNI
+    (`SSL_set_tlsext_host_name`) does NOT verify anything** (it only tells the server which
+    cert to serve). Without hostname verification, any attacker holding *any* CA-valid cert
+    MITMs the OFF path. So: call **`SSL_set1_host(ssl, host)`** (or `X509_VERIFY_PARAM_set1_host`
+    via `SSL_get0_param`) **before** the handshake, set `SSL_VERIFY_PEER` + SNI, load the trust
+    store (`SSL_CTX_set_default_verify_paths`), and **assert `SSL_get_verify_result == X509_V_OK`**.
+  - *Verify (real network, kept out of the default unit suite):* an HTTPS `GET` to a known good
+    host succeeds; **a valid-CA-but-WRONG-hostname host (e.g. `wrong.host.badssl.com`) is
+    rejected** (this is the case that distinguishes chain-only from real hostname verification —
+    a self-signed/expired host would pass while the code is still exploitable); a **plain-HTTP**
+    GET to a local test server works; a chunked response decodes correctly; the fake
+    `IHttpClient` remains what the T3.2/T4.1/T4.3 unit tests use.
 - **🚦 M0 review** — `workflow:review` at the boundary passes _(the libraries are the
   foundation everything else stands on — worth a careful read)._
 
@@ -601,9 +639,10 @@ addition, not a migration.
   (`/api` → backend) + typed API service (`HttpClient`) **coding against the D1 error
   envelope** (one `{error:{code,message,details}}` shape) + browse list page (**consuming the
   paginated summary list**) + detail page rendering title, image, source link, ingredients,
-  steps, both macro tables, **and `tags` (chips), `favorite` (star), `notes`, and
+  steps, both macro tables, **and `tags` (chips), `favorite` (star), `notes`,
   `prepTimeMin`/`cookTimeMin` (4th-review Red #1 — these fields exist in the format and are
-  filtered on in T5.2, so they must render)** (**showing the "estimated" marker when
+  filtered on in T5.2, so they must render), and each ingredient's per-row `note` (e.g.
+  "(uncooked weight)") so notes don't silently vanish (5th-review minor)** (**showing the "estimated" marker when
   `macrosEstimated` — on both the detail page and the browse list, which the summary
   projection already carries the flag for — plus a small `macroSource` badge
   (ingredients/llm/manual) on the detail page so provenance survives reload; **the badge is
@@ -729,7 +768,9 @@ addition, not a migration.
   `net` lib** (deferred from M0, first needed here) → disk volume + external-URL option
   (**store-only, no server-side fetch — M6b/SSRF**). Concrete validation per D6/M6:
   **server-generated filename** (UUID + extension, client filename ignored — no path
-  traversal), **size ≤ 8 MB**, **content-type ∈ {jpeg,png,webp} verified by magic bytes**.
+  traversal), **size ≤ 8 MB enforced *during* streaming** (reject as the bytes arrive, not
+  after buffering the whole part — else a large upload OOMs before the check; 5th-review minor,
+  mirroring the T0.2 body cap), **content-type ∈ {jpeg,png,webp} verified by magic bytes**.
   **Files are lifecycle-managed (3rd-review minor #6):** the uploads service **owns** the
   UUID-named files it wrote and unlinks any owned file no longer referenced by a
   `recipe_images` row — on recipe delete and on the PUT image diff (per the T1.3 ordering);
@@ -745,8 +786,9 @@ addition, not a migration.
   `lc_ctype`** (`Ä`↔`ä`, `Huhn`↔`huhn`); **no accent-folding** (`Hahnchen`↔`Hähnchen` are NOT
   equal) and **no extension** — needs no pinned PG version (4th-review Major #6; decided
   case-insensitive-only. `citext` is explicitly rejected — it only `lower()`-folds, does not
-  strip accents; accent-folding via `unaccent` is a deferred later option). Substring on
-  `title`, optionally `description`; **tag filter** (multi-select, **AND** semantics); a
+  strip accents; accent-folding via `unaccent` is a deferred later option). **`ILIKE`'s `Ä`↔`ä`
+  folding depends on a UTF-8 DB locale (not C/POSIX) — the Postgres container is initialized
+  with one (T6.1); 5th-review minor.** Substring on `title`, optionally `description`; **tag filter** (multi-select, **AND** semantics); a
   **favorites-only** toggle (`favorite = true`); **macro filters** `minProtein` + `maxCalories`
   on the per-serving macro columns; and **sort** by newest (`createdAt` desc, default), title
   A–Z, or highest protein. _(Full-text search over ingredients/steps is deferred to a later
@@ -759,8 +801,11 @@ addition, not a migration.
 
 ## Milestone 6 — Deployment & docs
 - **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime), on a
-  **pinned base-image tag** (reproducibility now rests on this, not a manifest — D1); the
-  build stage does **`apt install` of `libpq-dev`/`libssl-dev`/`libutf8proc-dev`/`catch2`**
+  **digest-pinned base image (`FROM …@sha256:…`, not a mutable tag — 5th-review T1)**; the
+  **Postgres service is initialized with a UTF-8 locale** (`POSTGRES_INITDB_ARGS=--locale`/
+  `LANG=…utf8`) so the T5.2 `ILIKE` `Ä`↔`ä` folding is guaranteed, not left to the default
+  (5th-review minor); the build stage does **`apt install` of
+  `libpq-dev`/`libssl-dev`/`libutf8proc-dev`/`catch2`**
   (prebuilt, fast). The **slim runtime image MUST include the runtime libs (`libpq5`,
   `libssl`, `libutf8proc`) and `ca-certificates`** — our own OpenSSL HTTPS client (T0.8)
   verifies the OFF cert against the system trust store, so without CA certs (or the runtime
@@ -779,11 +824,14 @@ addition, not a migration.
 - **T6.2** `docs/` usage + config (env vars, pointing at Ollama, Postgres backup, C++
   build notes **incl. the exact `apt install` package list (libpq, OpenSSL, utf8proc, Catch2)
   — using the pinned base image's real, version-specific package names** (e.g. `libssl3`, the
-  release's `libutf8proc`/Catch2 packages), not the generic placeholders — and the pinned
-  base-image tag, Angular build notes, **and the minimum build RAM** — Q8). **Verify the exact Ollama pull tag** for the documented `LLM_MODEL`
-  (`ollama list`) and put a resolvable tag in `.env.example`. *Verify:* a **concrete
-  copy-pasteable sequence** from the docs succeeds: `docker compose up` → `curl /health`
-  returns 200 → `POST` a sample recipe → it appears in `GET /api/recipes`.
+  release's `libutf8proc`/Catch2 packages), not the generic placeholders — and the
+  **digest-pinned base image** (T1), Angular build notes, **and the minimum build RAM** — Q8).
+  Note that **the multi-stage Dockerfile build is the source of truth for the shipped artifact**
+  — WSL dev only affects "works in dev, breaks in the image" surprises (5th-review minor).
+  **Verify the exact Ollama pull tag** for the documented `LLM_MODEL` (`ollama list`) and put a
+  resolvable tag in `.env.example`. *Verify:* a **concrete copy-pasteable sequence** from the
+  docs succeeds: `docker compose up` → `curl …/health` returns 200 → `POST` a sample recipe →
+  it appears in `GET /api/recipes`.
 
 ---
 
@@ -791,17 +839,51 @@ addition, not a migration.
 _Resolved this session (all locked): `Recipe` field list; browse/search scope (T5.2);
 paste-parser depth + source scope (D4 — social captions only); LLM model policy +
 no-translation (D3); milestone order (deploy stays M6); **per-100 g gap (M2) → add a
-piece-weight/spoon-volume table so it resolves for real recipes**; **scope (Q2) → keep all
-six milestones**. Remaining sign-off questions:_
+piece-weight/spoon-volume table so it resolves for real recipes**. Remaining sign-off
+questions:_
 1. **Auth seam default:** OK to include the auth-ready schema (users stub + nullable
    `owner_id`) now with **no auth implemented**, per D2/D6?
-2. **Scope:** all six milestones this phase, as laid out?
+2. **Scope:** all **SEVEN milestones (M0 core libraries + M1–M6)** this phase? _(5th-review
+   P2: M0 — the from-scratch HTTP server/JSON/validator/DB/HTTP-client — is the biggest,
+   riskiest piece; the sign-off must count it, not the old "six".)_
+3. **Freeze D1?** _(5th-review P4)_ Confirm the stack is now **final** — no further pivots
+   (framework, package manager, from-scratch scope) — so "ready to implement" stops resetting.
 
 _Stack: Angular SPA + **from-scratch C++ backend (no framework — own HTTP server/router/JSON/
 schema/DB-over-libpq/HTTP-client; externals = libpq, OpenSSL, Catch2)** + PostgreSQL._
 
 ## Reviewer notes
 _(newest round first)_
+
+**5th external review — consolidated, targets the from-scratch M0 (2026-08-24)**
+(`docs/reviews/PLAN_REVIEW_2026-08-24_external-5-consolidated.md`): confirmed **all 4th-review
+fixes genuinely resolved** and the plan body **clean of old-stack assumptions**; verdict "close
+but not ready to sign — blockers in the hand-rolled networking + doc/process." All folded:
+- _🔴 S1 TLS verifies only the chain, not the HOSTNAME (`SSL_VERIFY_PEER`+SNI ≠ hostname check)
+  → silent MITM on OFF_ → *Fixed*: T0.8 pins **`SSL_set1_host` + `SSL_get_verify_result==X509_V_OK`**;
+  verify uses a **valid-CA-wrong-hostname** host (`wrong.host.badssl.com`).
+- _🔴 S2 no memory-safety tooling for 4 hand-rolled untrusted-input parsers_ → *Fixed*: T0.1
+  adds **ASAN+UBSAN (+TSan for the pool)**; T0.2 + T0.4 get **libFuzzer/AFL++ harnesses**.
+- _🟠 P1 ROADMAP wholesale stale (Drogon/vcpkg/6-milestone, falsely says GATE 0 passed)_ →
+  *Fixed*: `docs/ROADMAP.md` rewritten to the current plan (M0, apt, seven milestones, GATE 0
+  pending).
+- _🟠 P2 "six milestones" but there are seven (M0+M1–M6)_ → *Fixed*: Goal + scope note +
+  sign-off Q2.
+- _🟠 P3 T0.5/T0.6/T0.7 depended on M1 artifacts_ → *Fixed*: compose Postgres moved to T0.1;
+  T0.5 tests a generic fixture schema (real schema in T1.2).
+- _🟠 P4 freeze D1 + make this 5th review a precondition_ → sign-off **Q3 (freeze D1)** added.
+- _🟠 T1 reproducibility overclaimed_ → *Fixed*: **digest-pin** the base image (D1/T6.1/T6.2).
+- _🟠 T2 HTTP request-smuggling framing_ → *Fixed*: T0.2 adds RFC 7230 §3.3.3 rules
+  (CL+TE, dup CL, bare CR/LF/NUL, overflow) + test vectors.
+- _🟠 T3 `nullable` isn't a JSON-Schema keyword; surrogate pairs; recursion cap_ → *Fixed*:
+  D2/T0.5 use `type:[…,"null"]`; T0.4 combines surrogate pairs + depth cap.
+- _minors_ → ILIKE UTF-8 locale (T6.1/T5.2); `PQexec` migration-only path (T0.6); multipart
+  streaming cap (T5.1); `/jsonschema` in layout; **C++20** pinned (T0.1); ingredient `note`
+  render (T2.1); WSL-vs-Docker parity note (T6.2).
+- _open decision surfaced to the human_ → the review questions whether the **hand-rolled TLS
+  client** specifically is worth it (poor learning-signal-per-risk); left for the human at
+  sign-off (default: keep from-scratch + the S1 fix).
+Awaiting a confirm pass, then the human signature (do NOT stamp until the human signs).
 
 **4th external review — consolidated (2026-08-24)** (`docs/reviews/PLAN_REVIEW_2026-08-24_external-4-consolidated.md`):
 verdict "ready at M1 today; one corrective pass before M2." Ran against the **pre-pivot** plan
