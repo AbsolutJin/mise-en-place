@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: 2026-08-24   # re-APPROVED after the from-scratch pivot (pivot review R1 → confirm APPROVE, T0.8 added). Human signature is the only remaining GATE 0 step.
+  reviewer: pending      # REOPENED again 2026-08-24 — human chose to drop vcpkg too, using system packages (apt) for libpq/OpenSSL/Catch2. Build-system change; re-review.
   human: pending      # was 2026-08-24; reset on the from-scratch pivot, awaiting re-signature
 ---
 
@@ -52,8 +52,12 @@ addition, not a migration.
     reimplement that — using libpq is using Postgres's own client, not a framework.
   - **HTTP client** — own client over sockets + **OpenSSL** for HTTPS (to OFF and the LLM;
     replaces libcurl), behind the `IHttpClient` seam (D3).
-  - **Irreducible externals kept** (via vcpkg): **libpq** (PG protocol), **OpenSSL** (TLS),
-    a **test framework** (Catch2). Everything else is ours.
+  - **Irreducible externals** (via **system packages / `apt`** — no package manager): **libpq**
+    (PG protocol), **OpenSSL** (TLS), a **test framework** (Catch2). Everything else is ours.
+    **No vcpkg** — the human chose system packages, knowingly trading vcpkg's reproducible,
+    checked-in version pinning for a simpler, dependency-manager-free build; reproducibility
+    instead rests on **pinned base-image / distro versions** in the Dockerfile (T6.1) and a
+    documented `apt install` list (T6.2). CMake finds the libs via `find_package`/`pkg-config`.
 - **Frontend:** **Angular SPA** (Angular CLI, `ng build` → static bundle), served as
   static files; it calls the backend over HTTP at `/api/*`. Chosen to learn a robust,
   structured framework; its **Reactive Forms** suit the dynamic ingredient-row form and
@@ -67,7 +71,7 @@ addition, not a migration.
   the own HTTP layer adds the CORS response headers.
 - **Monorepo layout:**
   ```
-  /backend    C++ from-scratch API (CMake, vcpkg for libpq/OpenSSL/Catch2)
+  /backend    C++ from-scratch API (CMake; libpq/OpenSSL/Catch2 via system apt packages)
     /lib          our libraries: /net (sockets+http server) /router /json /db /httpclient
     /app          /controllers  /models  /services  /migrations
     /tests
@@ -124,10 +128,12 @@ addition, not a migration.
   **single user** a small pool (e.g. 4–8 workers) is ample; we do **not** claim non-blocking
   I/O — blocking a worker is fine at this scale. (This is where building it ourselves teaches
   the concurrency model a framework would have hidden.)
-- **vcpkg note:** the `vcpkg.json` manifest pulls only the **irreducible externals** —
-  **libpq** (`libpq`), **OpenSSL** (`openssl`), and **Catch2**. No web framework. (The build
-  is far lighter than the old Drogon tree; Q8's Docker build-cost mitigation still applies to
-  libpq/OpenSSL.)
+- **Dependencies via system packages (no vcpkg):** the only externals are **libpq**,
+  **OpenSSL**, and **Catch2**, installed with **`apt`** (`libpq-dev`, `libssl-dev`,
+  `catch2`/`libcatch2-dev`) in dev (WSL) and in the Docker build stage. CMake locates them
+  with `find_package`/`pkg-config`. No framework, no dependency manager. (Reproducibility
+  rests on pinned distro/base-image versions per D1; the build compiles **none** of these
+  from source, so it is fast and light — Q8.)
 - **JSON + schema validation are OURS (D1):** own parser/serializer, and own validation of
   the `Recipe`/`Macros` schema. The schema in `docs/` stays the single source of truth, but
   since we validate it ourselves we are **not bound to a library's supported draft** — we
@@ -378,11 +384,10 @@ addition, not a migration.
   subject to OFF's rate limits); optional Ollama for LLM features. **Graceful degradation:**
   if OFF is unreachable, search returns cached-only results with a clear message, and
   manual + LLM macro entry still work — a network outage never blocks recipe entry.
-- **Build cost (Q8 — much smaller now):** the vcpkg build compiles only libpq + OpenSSL +
-  Catch2 (no framework tree), so build time/RAM are far lower than before — but OpenSSL is
-  still non-trivial, so on a small VPS there is some **OOM risk**. Mitigate with a
-  **vcpkg binary cache** (or a prebuilt-deps base image) so the deps compile once, and
-  document the minimum build RAM in T6.2.
+- **Build cost (Q8 — now minimal):** with `apt` system packages, libpq/OpenSSL/Catch2 install
+  as **prebuilt binaries** — they are **not compiled from source** — so the OOM risk that the
+  old Drogon/vcpkg-from-source build carried is essentially gone. Only our own code compiles.
+  (Base-image apt layers cache naturally; document the apt list + min build RAM in T6.2.)
 - **Auth assumption (M6c):** the app is **unauthenticated this phase** (single user).
   Because it is phone-reachable with full write + upload access, it MUST run behind a
   **VPN, or a reverse-proxy with basic-auth *over TLS/HTTPS*** — basic-auth without TLS
@@ -465,9 +470,10 @@ addition, not a migration.
 > New milestone from the 2026-08-24 from-scratch pivot (D1). Builds the plumbing a framework
 > would have given us, so later milestones have libraries to stand on. Everything here is
 > unit-tested in isolation; no recipe logic yet.
-- **T0.1** Toolchain + project skeleton: **CMake** + **`vcpkg.json` manifest** (only
-  **`libpq`**, **`openssl`**, **`catch2`** — no framework) + the `/backend/lib` + `/app` +
-  `/tests` layout (D1) + a Catch2 test target. Dev happens in **WSL2 (Ubuntu)**. *Verify:*
+- **T0.1** Toolchain + project skeleton: **CMake** finding the **system (apt) packages**
+  `libpq-dev`, `libssl-dev`, `catch2`/`libcatch2-dev` via `find_package`/`pkg-config` (no
+  vcpkg, no framework) + the `/backend/lib` + `/app` + `/tests` layout (D1) + a Catch2 test
+  target. Dev happens in **WSL2 (Ubuntu)**. *Verify:*
   `cmake --build` succeeds; a trivial Catch2 test runs green.
 - **T0.2** `net` — TCP socket listener + **HTTP/1.1 request parser** (request line, headers,
   body via `Content-Length` **and** chunked) + response writer + keep-alive + a **thread
@@ -716,11 +722,13 @@ addition, not a migration.
   verbatim** (3rd-review minor #5).
 
 ## Milestone 6 — Deployment & docs
-- **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime), using a
-  **vcpkg binary cache (or a prebuilt-deps base image)** so libpq/OpenSSL aren't recompiled
-  every build (Q8). The **slim runtime image MUST include `ca-certificates`** — our own
-  OpenSSL HTTPS client (T0.8) verifies the OFF cert against the system trust store, so
-  without CA certs the OFF path fails at deploy even though it passed in dev. + Angular
+- **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime), on a
+  **pinned base-image tag** (reproducibility now rests on this, not a manifest — D1); the
+  build stage does **`apt install` of `libpq-dev`/`libssl-dev`/`catch2`** (prebuilt, fast).
+  The **slim runtime image MUST include the runtime libs (`libpq5`, `libssl`) and
+  `ca-certificates`** — our own OpenSSL HTTPS client (T0.8) verifies the OFF cert against the
+  system trust store, so without CA certs (or the runtime libs) the OFF path fails at deploy
+  even though it passed in dev. + Angular
   `ng build` static bundle served by nginx with a **`location /api/ { proxy_pass → backend }`**
   block **and a `location /uploads/`** block (same-origin in prod; nginx serves uploads — M6)
   + `docker-compose.yml` (backend, frontend, postgres volume; `LLM_BASE_URL` → external
@@ -728,8 +736,8 @@ addition, not a migration.
   works against a persisted Postgres volume; `/api/*` and `/uploads/*` are reachable through
   nginx; **an OFF search from inside the running backend container succeeds (CA trust works)**.
 - **T6.2** `docs/` usage + config (env vars, pointing at Ollama, Postgres backup, C++
-  build/vcpkg notes, Angular build notes, **and the minimum build RAM** so a small VPS
-  doesn't OOM — Q8). **Verify the exact Ollama pull tag** for the documented `LLM_MODEL`
+  build notes **incl. the exact `apt install` package list** and the pinned base-image tag,
+  Angular build notes, **and the minimum build RAM** — Q8). **Verify the exact Ollama pull tag** for the documented `LLM_MODEL`
   (`ollama list`) and put a resolvable tag in `.env.example`. *Verify:* a **concrete
   copy-pasteable sequence** from the docs succeeds: `docker compose up` → `curl /health`
   returns 200 → `POST` a sample recipe → it appears in `GET /api/recipes`.
@@ -751,6 +759,17 @@ schema/DB-over-libpq/HTTP-client; externals = libpq, OpenSSL, Catch2)** + Postgr
 
 ## Reviewer notes
 _(newest round first)_
+
+**Drop vcpkg (2026-08-24)** — after the from-scratch pivot was reviewer-approved, the human
+chose to **drop vcpkg too and use system packages (`apt`)** for the three externals
+(libpq/OpenSSL/Catch2). A build-system change (not architecture): reviewer stamp reset again.
+Edits: D1 (externals via apt, no package manager; reproducibility now rests on pinned
+base-image/distro versions + a documented apt list), D2 (dependencies-via-apt note, CMake
+`find_package`/`pkg-config`), Q8 (build cost now minimal — prebuilt binaries, nothing compiled
+from source), T0.1 (CMake finds apt packages), T6.1 (pinned base image + `apt install` in the
+build stage + runtime libs `libpq5`/`libssl` and `ca-certificates`), T6.2 (document the apt
+list + base tag). **Knowing trade recorded:** loses vcpkg's checked-in version pinning; the
+human accepted this. Awaiting a reviewer confirm pass, then the human signature.
 
 **From-scratch pivot (2026-08-24)** — after GATE 0 was passed, the human chose to **drop the
 Drogon framework and build the backend from sockets up** (own HTTP server/router/JSON/schema/
