@@ -101,6 +101,18 @@ built **auth-ready** so auth is a later addition, not a migration.
   graceful fallback.
 - LLM is **off unless the engine toggle selects it**, so the app is fully usable with
   no LLM running.
+- **No translation:** the LLM only parses captions into schema JSON, **preserving the
+  original language** (German stays German). OFF search already handles German terms, so
+  German↔English translation is explicitly out of scope this phase.
+- **Model is not hard-coded** — chosen at runtime by `LLM_MODEL`; switching models is an
+  env change + restart (the model must be pulled in Ollama), no code change or rebuild.
+  Documented **reference default: `qwen3.5-9b`** (fast; best-in-family German, and the
+  fallback engine so speed matters). Higher-quality option: **`qwen3.8-27b`** for messy
+  captions. If strict JSON adherence ever becomes the bottleneck despite structured
+  output, **Gemma 4 27B (Q4_K_M)** is a noted alternative. (Rationale: 2026 benchmarks
+  put Qwen3 as the leader for non-English/German, while JSON reliability here comes from
+  the server's structured-output mode + `valijson` validation + fallback, not model
+  obedience.)
 
 ### D4 — Paste parsing: two engines behind one interface
 - **Scope this phase: social captions only** — TikTok / Instagram free-text captions
