@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: pending      # REOPENED 2026-08-24 — 4th external review (consolidated) found 2 real contradictions + majors in the M2/M5/M6 text (tags/favorite write path; PUT recompute; NFC mechanism; uploads volume; /health routing; search collation). Folding in, then re-confirm.
+  reviewer: 2026-08-24   # re-APPROVED after folding all 4 external reviews + from-scratch pivot + vcpkg drop. Human signature is the only remaining GATE 0 step.
   human: pending      # was 2026-08-24; reset on the from-scratch pivot, awaiting re-signature
 ---
 
@@ -606,7 +606,8 @@ addition, not a migration.
   filtered on in T5.2, so they must render)** (**showing the "estimated" marker when
   `macrosEstimated` — on both the detail page and the browse list, which the summary
   projection already carries the flag for — plus a small `macroSource` badge
-  (ingredients/llm/manual) on the detail page so provenance survives reload**).
+  (ingredients/llm/manual) on the detail page so provenance survives reload; **the badge is
+  omitted when `macrosPerServing` is unset/all-zero**, so a macro-less recipe shows none**).
   *Verify:* `ng build` passes and `ng test` runs green using **ChromeHeadlessNoSandbox**
   (Chromium installed in the test env); against the running API (via the dev proxy) the
   list + a detail page render a seeded recipe with both macro columns (component test
@@ -824,7 +825,9 @@ the from-scratch/vcpkg changes) were all folded in:
   fixture note fixed in their own files.
 - _stale (already resolved by the pivot; noted, not acted)_ → NFC-lib-in-vcpkg, valijson
   `$schema`, Drogon `DbClient connectionNumber=1`, Drogon/vcpkg first-build risk.
-Awaiting a confirm pass, then the human signature.
+**Confirm pass: APPROVE** — all seven corrective edits verified present, correct, and
+consistent; M0→M6 ordering holds; 1 non-blocking folded (badge omitted when macros unset).
+Reviewer signature re-stamped `2026-08-24`; **human GATE 0 signature is the only remaining step.**
 
 **Drop vcpkg (2026-08-24)** — after the from-scratch pivot was reviewer-approved, the human
 chose to **drop vcpkg too and use system packages (`apt`)** for the three externals
