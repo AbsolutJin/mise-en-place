@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: pending      # rolled back again 2026-08-24 — 2nd external review found 1 blocking + 5 major (2 introduced by the M2 fix); addressing + re-review
+  reviewer: 2026-08-24   # re-APPROVED (Round 10 confirm) after folding in the 2nd external review; rolled back twice mid-session, see Reviewer notes
   human: pending      # date (YYYY-MM-DD) on human approval
 ---
 
@@ -630,6 +630,13 @@ _Stack is settled: Angular SPA + C++/Drogon backend + PostgreSQL._
 
 ## Reviewer notes
 _(newest round first)_
+
+**Round 10** (diff-only confirm on the Round 9 fixes): **APPROVE** — `macros_estimated`
+now consistent across format → storage → compute → detail + list display; the migration
+lock pins one sound mechanism; `429`-vs-cache precedence and `PUT`/`DELETE` `:id`/`204`
+pinned. No blocking, no non-blocking, no new inconsistency. Reviewer signature stamped
+`2026-08-24`. **Human GATE 0 signature still pending** (a possible 3rd external review is
+the user's call).
 
 **Round 9** (workflow reviewer over the 2nd-external-review fold-in, aimed at
 implementability depth + fact-checking): confirmed all the folded fixes present and
