@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: 2026-08-23   # date (YYYY-MM-DD) on reviewer APPROVE (round 3 confirm, OFF design)
+  reviewer: 2026-08-24   # date (YYYY-MM-DD) on reviewer APPROVE (round 5 confirm, session deltas)
   human: pending      # date (YYYY-MM-DD) on human approval
 ---
 
@@ -11,8 +11,8 @@ approvals:
 ## Goal
 Build a **single-user, self-hosted** web app to store, browse, and add recipes.
 Recipes are added via a **structured form** or by **pasting free text** (TikTok /
-Instagram caption, website text), which is normalised into one **standardised
-recipe format**. Recipes render with optional image(s), an optional source link,
+Instagram caption), which is normalised into one **standardised
+recipe format**. (Pasted website text and URL/HTML import are a later phase — see D4.) Recipes render with optional image(s), an optional source link,
 and **macros shown both per portion and per 100 g**. Macros are **auto-computed
 from ingredients** via a nutrition database, with a **button to LLM-estimate**
 instead. Paste-parsing and macro-estimation each offer a **user-selectable engine:
@@ -20,8 +20,9 @@ rule-based or a local LLM** (HTTP API, e.g. Ollama).
 
 This plan covers the **product foundation** (all core features end-to-end) across
 six milestones. It is the first workflow phase; later phases (advanced search,
-tagging, meal planning, authentication) are out of scope here — but the schema is
-built **auth-ready** so auth is a later addition, not a migration.
+tagging, meal planning, authentication, and **website-text / URL import** — see D4)
+are out of scope here — but the schema is built **auth-ready** so auth is a later
+addition, not a migration.
 
 ## Locked design decisions
 > These are the decisions agreed with the human at GATE 0. A **C++ backend was
@@ -93,8 +94,10 @@ built **auth-ready** so auth is a later addition, not a migration.
   event-loop-bound `HttpClient` because a plain blocking POST is simpler to call from a
   request handler and easier for a beginner (note: HTTPS to a remote LLM pulls in
   OpenSSL). It calls an **OpenAI-compatible chat endpoint**. Config via env:
-  `LLM_BASE_URL` (server root, default `http://localhost:11434`), `LLM_MODEL`, optional
-  `LLM_API_KEY`. The client appends **`/v1/chat/completions`** (Ollama's OpenAI-compatible
+  `LLM_BASE_URL` (server root, default `http://localhost:11434`), `LLM_MODEL` (**no baked
+  default — documentation-only; if unset, the LLM engine is unavailable and the toggle is
+  disabled, never a silent guess**), optional `LLM_API_KEY`. The client appends
+  **`/v1/chat/completions`** (Ollama's OpenAI-compatible
   surface — most portable; not the native `/api/chat`). JSON reliability uses the
   server's structured-output / `response_format` support, not prompt-only coercion, and
   every response is **validated with `valijson` against the `Recipe`/macro schema** with
@@ -108,7 +111,9 @@ built **auth-ready** so auth is a later addition, not a migration.
   env change + restart (the model must be pulled in Ollama), no code change or rebuild.
   Documented **reference default: `qwen3.5-9b`** (fast; best-in-family German, and the
   fallback engine so speed matters). Higher-quality option: **`qwen3.8-27b`** for messy
-  captions. If strict JSON adherence ever becomes the bottleneck despite structured
+  captions. **These tags are illustrative** (they mirror the user's local launcher labels,
+  not confirmed Ollama registry ids) — **T6.2 must verify the exact `ollama pull` tag** so
+  the `.env.example` default actually resolves. If strict JSON adherence ever becomes the bottleneck despite structured
   output, **Gemma 4 27B (Q4_K_M)** is a noted alternative. (Rationale: 2026 benchmarks
   put Qwen3 as the leader for non-English/German, while JSON reliability here comes from
   the server's structured-output mode + `valijson` validation + fallback, not model
@@ -126,6 +131,11 @@ built **auth-ready** so auth is a later addition, not a migration.
     free, deterministic; the app is fully usable with no LLM running.
   - `LlmParser` — **the fallback** for messy captions the rules miss: sends pasted text
     + the `Recipe` JSON Schema to the local LLM, asks for schema-valid JSON, validates it.
+    "Fallback" here means **user-selected** (the human toggles to the LLM engine when the
+    rules do poorly) — there is **no automatic rule→LLM handoff**. When the LLM returns
+    invalid/unparseable JSON, the documented behaviour is to surface a **best-effort or
+    empty draft into the editable preview with a warning** (never a silent save, never an
+    auto-retry with the other engine); the human then corrects it in the preview.
 - **UI:** on the paste screen the user picks the engine, sees the parsed result in an
   **editable preview form** (reuses the M2 form), corrects anything, then saves.
   Parsing never saves directly — the human always confirms.
@@ -315,8 +325,11 @@ built **auth-ready** so auth is a later addition, not a migration.
   unit tests parse the three representative captions into the expected structured fields,
   including grouping, null-quantity rows, the extracted macro block, and empty steps.
 - **T3.2** `LlmClient` + `LlmParser` (OpenAI-compatible call, schema validation, fallback
-  on invalid). *Verify:* unit test with a **mocked** HTTP/LLM response asserts valid JSON
-  is accepted and malformed JSON triggers the documented fallback (no live LLM in tests).
+  on invalid). Documented fallback = on invalid/unparseable LLM JSON, return a
+  **best-effort or empty draft into the editable preview with a warning** (no auto-retry,
+  no silent save). *Verify:* unit test with a **mocked** HTTP/LLM response asserts valid
+  JSON is accepted and malformed JSON triggers that documented fallback — an empty/partial
+  draft plus a warning flag, not an exception or a saved record (no live LLM in tests).
 - **T3.3** Paste screen: textarea, engine toggle (rule-based / local LLM), parse →
   **editable preview form** (reuses M2 form) → save. *Verify:* pasting a sample with the
   rule-based engine produces a pre-filled, editable form that saves correctly.
@@ -372,13 +385,17 @@ built **auth-ready** so auth is a later addition, not a migration.
   compose up` builds and serves the app; browse works against a persisted Postgres
   volume; `/api/*` is reachable through nginx.
 - **T6.2** `docs/` usage + config (env vars, pointing at Ollama, Postgres backup, C++
-  build/vcpkg notes, Angular build notes). *Verify:* a **concrete copy-pasteable
+  build/vcpkg notes, Angular build notes). **Verify the exact Ollama pull tag** for the
+  documented `LLM_MODEL` (`ollama list`) and put a resolvable tag in `.env.example`. *Verify:* a **concrete copy-pasteable
   sequence** from the docs succeeds: `docker compose up` → `curl /health` returns 200 →
   `POST` a sample recipe → it appears in `GET /api/recipes`.
 
 ---
 
 ## Open questions for the human (GATE 0)
+_Resolved this session (all locked): `Recipe` field list; browse/search scope (T5.2);
+paste-parser depth + source scope (D4 — social captions only); LLM model policy +
+no-translation (D3); milestone order (deploy stays M6). Remaining sign-off questions:_
 1. **Auth seam default:** OK to include the auth-ready schema (users stub + nullable
    `owner_id`) now with **no auth implemented**, per D2/D6?
 2. **Scope:** all six milestones this phase, as laid out?
@@ -387,6 +404,22 @@ _Stack is settled: Angular SPA + C++/Drogon backend + PostgreSQL._
 
 ## Reviewer notes
 _(newest round first)_
+
+**Round 4** (re-confirm on this session's deltas — D4 parser scope, D3 LLM policy,
+milestone order): **CHANGES REQUIRED** — 1 blocking, 4 non-blocking. All addressed:
+- _B1 Goal still listed "website text" as in-scope, contradicting the D4 scope lock_ →
+  *Fixed*: struck from the Goal + added website/URL import to the out-of-scope list.
+- _NB1 out-of-scope list omitted website/URL parsing_ → *Fixed* (same edit).
+- _NB2 "documented fallback" undefined; primary/fallback vs. user-toggle ambiguity_ →
+  *Fixed*: D4 states "fallback" = user-selected (no auto rule→LLM handoff), and invalid
+  LLM JSON returns a best-effort/empty draft into the editable preview with a warning
+  (no auto-retry, no silent save); T3.2 verify updated to assert exactly that.
+- _NB3 model tags may not map to real Ollama registry ids_ → *Fixed*: D3 labels the tags
+  illustrative; T6.2 must verify the exact `ollama pull` tag for `.env.example`.
+- _NB4 `LLM_MODEL` had no defined unset behaviour_ → *Fixed*: D3 states no baked default
+  (documentation-only); if unset, the LLM engine is unavailable and the toggle disabled.
+**Round 5** (diff-only confirm on the Round 4 fixes): **APPROVE** — all five findings
+resolved, no new inconsistency. Reviewer signature stamped `2026-08-24`.
 
 **Round 1** (TS/SvelteKit stack, superseded): APPROVE with 8 non-blocking; findings
 folded into D3/D5 before the stack changed.
