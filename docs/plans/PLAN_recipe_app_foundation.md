@@ -2,7 +2,7 @@
 plan: recipe_app_foundation
 status: draft
 approvals:
-  reviewer: 2026-08-24   # date (YYYY-MM-DD) on reviewer APPROVE (round 5 confirm, session deltas)
+  reviewer: pending      # rolled back 2026-08-24 — a deeper external review (2 independent passes) found 3 blocking gaps (storage shape, HTTP mock seam, UTF-8 parsing) the workflow reviewer missed; must be addressed + re-reviewed
   human: pending      # date (YYYY-MM-DD) on human approval
 ---
 
@@ -38,8 +38,10 @@ addition, not a migration.
 - **Frontend:** **Angular SPA** (Angular CLI, `ng build` → static bundle), served as
   static files; it calls the backend over HTTP at `/api/*`. Chosen to learn a robust,
   structured framework; its **Reactive Forms** suit the dynamic ingredient-row form and
-  editable paste-preview particularly well. **Pin the Angular major version** (v17+
-  application builder) up front — it affects builder/test defaults and the proxy config.
+  editable paste-preview particularly well. **Pin an exact Angular version** (a specific
+  `17.x.y`, not "v17+") in `package.json` up front — a floor like `^17` lets a fresh build
+  pull a newer major with different builder/test defaults, the exact drift a pin prevents.
+  The version affects the application-builder and test defaults and the proxy config.
 - **Same-origin strategy (no CORS):** in **dev**, `ng serve` (:4200) proxies `/api` →
   the Drogon backend via `frontend/proxy.conf.json` (`ng serve --proxy-config`); in
   **prod**, nginx serves the static bundle and **reverse-proxies `/api/*`** to the
@@ -54,26 +56,61 @@ addition, not a migration.
   docker-compose.yml
   ```
 - **Trade-off accepted:** two build systems and two deploys; the `Recipe` type is
-  **not auto-shared** across C++/TS — mitigated by D2 (a single JSON-Schema source of
-  truth in `docs/`, validated on both sides).
+  **not auto-shared** across C++/TS — three representations (JSON Schema, C++ struct, TS
+  type) are kept in sync **by hand** this phase, a known drift risk (Q9). Mitigated by D2
+  (a single JSON-Schema source of truth in `docs/`, validated on both sides) and the T1.2
+  round-trip test; a codegen step (e.g. `json-schema-to-typescript` for the TS type) is a
+  clean later addition if drift bites.
 
 ### D2 — Storage: PostgreSQL, with JSON as the interchange format
 - **PostgreSQL** via Drogon's `DbClient`. Chosen over SQLite because the human intends
   to add **auth / multi-user later**, where Postgres is the sturdier base; the extra
   container is cheap under Docker Compose. **DB access uses the synchronous
-  `execSqlSync` style** (run off the event loop) — chosen over coroutines/callbacks to
-  keep it approachable for a C++ beginner; standardized in docs.
+  `execSqlSync` style** — chosen over coroutines/callbacks to keep it approachable for a
+  C++ beginner; standardized in docs.
+- **Threading (M3 — honest statement):** Drogon request handlers run **on the event-loop
+  threads**, and `execSqlSync` (and the synchronous libcurl calls to OFF/LLM) **block the
+  calling loop thread**. For a **single user** this is acceptable; we do **not** claim
+  non-blocking I/O. Mitigation: size the loop pool with **`setThreadNum`** (a small N, e.g.
+  4–8) so one blocked handler doesn't stall the app, and keep long outbound calls (OFF/LLM)
+  on request paths the user initiates. (Drogon's async value is largely unused this phase;
+  accepted as a beginner-friendly trade — see Q2 in Reviewer notes.)
 - **vcpkg note:** Drogon must be pulled with the **`postgres` feature** enabled
   (`"drogon": { "features": ["postgres"] }` in `vcpkg.json`) — the default port has no
   libpq backend and `DbClient` for Postgres won't link without it. First build compiles
-  Drogon's dependency tree and is slow.
+  Drogon's dependency tree and is slow (see Q8 for the Docker build-cost mitigation).
 - **JSON Schema validation:** jsoncpp (bundled with Drogon) only parses/serializes, so a
   dedicated validator is required — **`valijson`** (header-only, in vcpkg, has a jsoncpp
-  adapter). This backs every "schema-validated" step (T1.2, T3.2, T4.3).
+  adapter). **valijson supports JSON Schema Draft 7** (and a Draft 4 subset) — **not**
+  2019-09/2020-12 — so the `Recipe` schema is authored to **Draft 7** and carries the
+  matching `"$schema"` (Q4), or it silently under-validates. This backs every
+  "schema-validated" step (T1.2, T3.2, T4.3).
 - **Migrations:** plain **SQL files** in `/backend/migrations`, applied by a small
-  **idempotent runner** on startup that records applied versions in a `schema_migrations`
-  table (so re-running on boot is safe) — no ORM code-gen magic, easy to read while
-  learning.
+  **version-tracking runner** on startup that records applied versions in a
+  `schema_migrations` table. Each migration runs **inside a transaction** and its version
+  is recorded **only on success** (so a failed migration doesn't half-apply); the runner
+  takes a **Postgres advisory lock** (`pg_advisory_lock`) around the run so two instances
+  booting concurrently can't race (Q7). ("Idempotent" = safe to re-run the runner, via
+  version-tracking; the DDL itself is not required to be idempotent.) No ORM code-gen
+  magic — easy to read while learning.
+- **Relational storage shape (B1 — decided, not JSONB blobs):**
+  - `recipes` — one row per recipe: scalar fields (`title`, `description`, `source_url`,
+    `servings`, `prep_time_min`, `cook_time_min`, `total_weight_g`, `favorite`, `notes`,
+    `schema_version`, `owner_id`, `created_at`, `updated_at`) + the **per-serving macro
+    columns** (`cal`, `protein`, `carbs`, `fat`) + `macro_source`.
+  - `recipe_ingredients` — **child table**, FK `recipe_id`, an explicit **`position`**
+    integer for ordering, and columns `group` (nullable section label), `name`,
+    `quantity` (nullable), `unit` (nullable), `food_id` (nullable FK → `foods`), `note`
+    (nullable). This is where the nullable-quantity/to-taste rows and grouping live.
+  - `recipe_steps` — **child table**, FK `recipe_id`, `position`, `text`. (Ordered; may
+    be empty for video-only captions.)
+  - `recipe_images` — **child table**, FK `recipe_id`, `position`, `url`.
+  - `recipe_tags` — **join table**, `(recipe_id, tag)` unique. The T5.2 **tag AND-filter**
+    is `... WHERE tag = ANY($tags) GROUP BY recipe_id HAVING count(*) = $n`.
+  - Rationale: ordered/queried collections are real rows (clean ordering, the tag-filter
+    and macro-range SQL in T5.2, and future FTS all work), not opaque JSONB. The canonical
+    `Recipe` **JSON** is assembled from these tables at the API boundary (D2's interchange
+    layer); JSON is the wire format, these tables are the persistence.
 - **Auth-ready schema (no auth implemented this phase):** a `users` table stub and a
   **nullable `owner_id`** FK on `recipes`. Nothing enforces it yet; it exists so auth
   is a later addition, not a schema migration of live data.
@@ -86,22 +123,31 @@ addition, not a migration.
   serialization) and a TS type. It is validated at every API boundary, on paste-parser
   output, on LLM output, and used for export. So "everything becomes standardised
   JSON" holds at the API/interchange layer; Postgres is the persistence detail. The format
-  carries a **`schemaVersion`** so future format changes are migratable. (A YAML
-  import/export convenience could be layered on later; JSON stays canonical.)
+  carries a **`schemaVersion`** — under relational storage this **earns its keep mainly at
+  the export/interchange layer** (a stored-format change is a SQL migration regardless), so
+  it is kept but not oversold (Q6). (A YAML import/export convenience could be layered on
+  later; JSON stays canonical.)
 
-### D3 — Local-LLM integration (pluggable, OpenAI-compatible)
-- A small C++ `LlmClient` using **libcurl (synchronous)** — chosen over Drogon's
-  event-loop-bound `HttpClient` because a plain blocking POST is simpler to call from a
-  request handler and easier for a beginner (note: HTTPS to a remote LLM pulls in
-  OpenSSL). It calls an **OpenAI-compatible chat endpoint**. Config via env:
+### D3 — Local-LLM integration (pluggable, behind an HTTP-client seam)
+- **HTTP-client seam (B2 — testability):** outbound HTTP does **not** call libcurl
+  directly from `LlmClient`/the OFF client. A tiny **`HttpClient` interface**
+  (`get`/`post` → status + body) has a **libcurl (synchronous) implementation** for
+  production and a **fake/stub implementation** for tests. This is the seam the mocked-HTTP
+  verifications in T3.2, T4.1, and T4.3 depend on — without it, direct libcurl is not
+  mockable. (libcurl sync chosen over Drogon's event-loop-bound `HttpClient` for beginner
+  simplicity; note HTTPS pulls in OpenSSL. Blocking behaviour is covered in D2/M3.)
+- `LlmClient` (built on the `HttpClient` seam) calls a local LLM. Config via env:
   `LLM_BASE_URL` (server root, default `http://localhost:11434`), `LLM_MODEL` (**no baked
   default — documentation-only; if unset, the LLM engine is unavailable and the toggle is
-  disabled, never a silent guess**), optional `LLM_API_KEY`. The client appends
-  **`/v1/chat/completions`** (Ollama's OpenAI-compatible
-  surface — most portable; not the native `/api/chat`). JSON reliability uses the
-  server's structured-output / `response_format` support, not prompt-only coercion, and
-  every response is **validated with `valijson` against the `Recipe`/macro schema** with
-  graceful fallback.
+  disabled, never a silent guess**), optional `LLM_API_KEY`.
+- **Endpoint + structured output (M5):** default to **Ollama's native `/api/chat` with the
+  `format` parameter set to the `Recipe`/macro JSON Schema** — reports indicate the native
+  `format` (schema-enforced) is **more reliable** than the OpenAI-compatible
+  `/v1/chat/completions` + `response_format: json_schema` path, which several models
+  **ignore**. The OpenAI-compatible surface is kept as a **configurable fallback** for
+  non-Ollama servers. Either way, **every response is validated with `valijson`** against
+  the schema, with the documented graceful fallback (an empty/partial draft into the
+  editable preview + a warning — see D4/T3.2) on invalid output. Not prompt-only coercion.
 - LLM is **off unless the engine toggle selects it**, so the app is fully usable with
   no LLM running.
 - **No translation:** the LLM only parses captions into schema JSON, **preserving the
@@ -129,6 +175,15 @@ addition, not a migration.
     fully handles the pinned caption patterns (sections→`group`, quantity/unit regex,
     macro block, to-taste rows, parenthetical→note, hashtag/emoji stripping). Offline,
     free, deterministic; the app is fully usable with no LLM running.
+    - **UTF-8 is a first-class concern (B3), not trivial regex.** Captions are full of
+      multi-byte content — emoji (🍗💪🛒), umlauts/ß (`Eiweiß`, `Hähnchen`, `Kohlenhydrate`),
+      `%`/`€`. **`std::regex` is not UTF-8-aware** (it byte-matches under the default
+      locale) and must **not** carry the parsing. Strategy: use a **UTF-8-aware regex
+      engine — `RE2`** (Google, in vcpkg, UTF-8/Unicode-aware) — added to the T1.1 manifest;
+      strip emoji/symbols by **Unicode codepoint ranges** (decode UTF-8 → filter), not byte
+      hacks; and **anchor quantity matches at line/token start** so `140ml Kochsahne 7%`
+      does not read the `7` as a quantity. German unit words (`TL`/`EL`/`Stück`/`Prise`)
+      and macro labels (`Eiweiß`/`Kohlenhydrate`/`Fett`) are matched as whole tokens.
   - `LlmParser` — **the fallback** for messy captions the rules miss: sends pasted text
     + the `Recipe` JSON Schema to the local LLM, asks for schema-valid JSON, validates it.
     "Fallback" here means **user-selected** (the human toggles to the LLM engine when the
@@ -149,15 +204,30 @@ addition, not a migration.
   leaves a seam to add USDA (clean generic whole-food values) as a secondary source later.
   OFF is **ODbL**-licensed — fine for personal self-hosted use; a small "Data from Open
   Food Facts (ODbL)" attribution line is shown in the UI.
+- **Known data-quality risk (M4 — relocated, not eliminated):** OFF is a **branded-product**
+  database with sparse, uneven, user-contributed per-100 g data for **generic whole foods**
+  (chicken breast, rump steak, rice, onion) — exactly what these fixtures are made of.
+  Search-and-pick removes the *auto-match* error, but the user still picks among branded
+  entries for a whole food, and quality varies. Mitigations (all already in the flow):
+  the pick UI **prefers products with complete nutriments / a nutrition grade** (T4.2b),
+  **manual override is always available** (a generic whole-food value the user trusts),
+  and the **USDA seam** (clean generic values) is the intended future secondary source for
+  exactly this gap. Documented as a real limitation, not a solved problem.
 - **Search-and-pick per ingredient (human in the loop):** rather than auto-guessing a
   match (the previous plan's biggest accuracy risk), the user **searches OFF for each
   ingredient and picks the right food**; `quantity × per-100 g` → macros. This removes
   the risky fuzzy auto-match.
-- **OFF API contract (pinned):** text search via `/cgi/search.pl?search_terms=…&json=1`
-  (or Search-a-licious); product reads by barcode. OFF **mandates a descriptive
-  `User-Agent`** (e.g. `mise-en-place/0.1 (contact)`) — the default libcurl UA is
-  throttled/blocked — and enforces **rate limits** (~10 req/min search, ~100 req/min
-  product) returning 429. The client sets the UA and handles 429 with backoff.
+- **OFF API contract (M1 — verify current limits before building backoff):** text search
+  via **Search-a-licious** (`/api/v2/search`) as the current path; the legacy
+  `/cgi/search.pl?search_terms=…&json=1` is documented "not recommended for new
+  integrations" and is only a fallback, not the pinned primary. Product reads by barcode.
+  OFF **mandates a descriptive `User-Agent`** (e.g. `mise-en-place/0.1 (contact)`) — the
+  default libcurl UA is throttled/blocked — and enforces **rate limits** returning 429.
+  **Do not hard-code the old "~100/min product" figure — it is wrong/too high** (current
+  reported product limit is materially lower, ~15/min; search ~10/min). **T4.1 must confirm
+  the exact current limits against the live OFF docs** and size the backoff conservatively
+  (a too-generous budget invites an IP ban). The client sets the UA and handles 429 with
+  exponential backoff.
 - **Per-100 g nutrient mapping (pinned — avoids the kJ/kcal trap):** read
   `energy-kcal_100g` for calories (fall back to `energy_100g ÷ 4.184`, since `energy_100g`
   is kJ), and `proteins_100g` / `carbohydrates_100g` / `fat_100g`. **Products missing the
@@ -175,6 +245,16 @@ addition, not a migration.
   uses a **small built-in density table for common liquids** (water, milk, oil…), falls
   back to water-equivalent (1 g/ml) only as a last resort, and **flags** volume ingredients
   with no density (flagged, not silently zeroed). Macros stay always-overridable.
+- **Piece/spoon resolution (M2 — so per-100 g isn't dark for real recipes):** the fixtures
+  are dominated by piece and spoon units (`2 Knoblauchzehen`, `1 rote Zwiebel`, `1 TL`,
+  `2 tbsp`) that the strict rule below would leave unresolved — making per-100 g "—" for
+  virtually every real recipe. To fix that, the converter also carries a **small
+  piece-weight table** (e.g. 1 clove ≈ 5 g, 1 onion ≈ 150 g, 1 egg ≈ 60 g, 1 bell pepper
+  ≈ 150 g) and **fixed spoon volumes** (TL/tsp ≈ 5 ml, EL/tbsp ≈ 15 ml → grams via the
+  density table), and uses **OFF `serving_size`/`product_quantity` when parseable** as a
+  per-piece weight. These are **approximate defaults, clearly overridable**, but they let
+  common recipes reach a full `totalWeightG`. Units with no table entry and no density
+  remain **flagged** (not silently zeroed).
 - **LLM-estimate button:** asks the local LLM for per-portion macros (and an estimated
   total weight) when the DB lookup is incomplete or the user prefers it.
 - **Manual:** the user can always type/override macros.
@@ -184,13 +264,27 @@ addition, not a migration.
   auto-populated **only when *every* ingredient is picked *and* every unit resolves to
   grams**; if any ingredient is unpicked or has an unresolvable (flagged) unit, total
   weight is partial, so per-100 g shows **"—"** (same path as manual/LLM entries with no
-  weight) rather than a silently wrong value. Macro fields: calories, protein, carbs, fat
-  (extensible).
+  weight) rather than a silently wrong value. With the M2 piece/spoon resolution above,
+  common recipes now *do* reach a full weight; the "—" is the honest last-resort, not the
+  normal case. Macro fields: calories, protein, carbs, fat (extensible).
+- **Raw vs cooked weight (Q10 — documented caveat):** `totalWeightG` is the **sum of raw
+  ingredient weights**, not the finished-dish weight (water evaporates in cooking), so the
+  derived per-100 g is *per 100 g of raw input* and slightly understates the cooked dish.
+  Acceptable for this phase; surfaced in the UI/docs so the number isn't mistaken for
+  cooked-weight nutrition. The user can override `totalWeightG` with a measured cooked
+  weight if they want cooked-basis per-100 g.
 
 ### D6 — Media, source link, deployment
-- **Images:** optional upload(s) via Drogon multipart → disk volume, referenced by URL;
-  also accept an external image URL. Validated type/size.
-- **Source link:** optional URL field, shown as a link on the recipe page.
+- **Images (M6 — concrete limits, not just "validated"):** optional upload(s) via Drogon
+  multipart → disk volume, referenced by URL. The backend **generates its own filename**
+  (UUID + validated extension) and **never trusts the client filename** (no path traversal);
+  it enforces **size ≤ 8 MB** and **content-type ∈ {jpeg, png, webp}** verified by magic
+  bytes, not just the header. The uploads directory is **served by nginx** in prod (a
+  `location /uploads/` block), not by Drogon.
+- **External image URL (M6b — no SSRF):** the "external image URL" option is **store-only**
+  — the URL is saved and rendered by the browser; the **backend does not fetch it**. This
+  closes the SSRF hole (a server-side fetch could hit the home LAN / Ollama / Postgres).
+- **Source link:** optional URL field, shown as a link on the recipe page (store-only).
 - **Deploy:** Docker Compose — **backend** (multi-stage C++ build → slim runtime),
   **frontend** (static build served by nginx), **postgres** (with a volume); Ollama is
   the user's own service referenced by `LLM_BASE_URL`. Runs on a home server / VPS.
@@ -198,9 +292,15 @@ addition, not a migration.
   subject to OFF's rate limits); optional Ollama for LLM features. **Graceful degradation:**
   if OFF is unreachable, search returns cached-only results with a clear message, and
   manual + LLM macro entry still work — a network outage never blocks recipe entry.
-- **Auth assumption:** the app is **unauthenticated this phase** (single user). Because
-  it is phone-reachable with full write + upload access, it MUST run behind a
-  VPN / reverse-proxy basic-auth until in-app auth lands. Schema is auth-ready (D2).
+- **Build cost (Q8):** the vcpkg build compiles Drogon's whole dependency tree from
+  scratch — slow and memory-hungry, and a risk of **OOM on a small VPS**. Mitigate with a
+  **vcpkg binary cache** (or a prebuilt-deps base image) so the deps compile once, and
+  document the minimum build RAM in T6.2.
+- **Auth assumption (M6c):** the app is **unauthenticated this phase** (single user).
+  Because it is phone-reachable with full write + upload access, it MUST run behind a
+  **VPN, or a reverse-proxy with basic-auth *over TLS/HTTPS*** — basic-auth without TLS
+  ships credentials in clear over a phone-reachable link, so **HTTPS is part of the
+  caveat, not optional** — until in-app auth lands. Schema is auth-ready (D2).
 
 ## Standardised recipe format (`Recipe`) — locked field list
 > **Locked at GATE 0** and validated against real German + English TikTok captions
@@ -263,33 +363,43 @@ addition, not a migration.
 
 ## Milestone 1 — Backend scaffold, schema, DB, browse API
 - **T1.1** C++ toolchain + CMake + **`vcpkg.json` manifest** (`drogon[postgres]`,
-  `valijson`, `libcurl`, a test framework; jsoncpp comes vendored with Drogon) + Drogon
-  skeleton; `/health`
-  endpoint; Postgres connection from env; idempotent **migration runner** with a
-  `schema_migrations` table; `docker-compose` with a postgres service for dev. *Verify:*
-  `cmake --build` succeeds (first build pulls Drogon's deps, slow); app boots; `GET
-  /health` returns 200; logs show a successful Postgres connection; re-running the app
-  does not re-apply migrations.
+  `valijson`, `libcurl`, **`re2`** (UTF-8-aware regex for T3.1, B3), and a **named test
+  framework — Catch2**; jsoncpp comes vendored with Drogon) + Drogon skeleton; `/health`
+  endpoint; Postgres connection from env; **`setThreadNum`** sized (D2/M3); a
+  **version-tracking migration runner** with a `schema_migrations` table that wraps each
+  migration in a **transaction** (version recorded only on success) and takes a
+  **`pg_advisory_lock`** around the run (Q7); `docker-compose` with a postgres service for
+  dev. *Verify:* `cmake --build` succeeds (first build pulls Drogon's deps, slow); app
+  boots; `GET /health` returns 200; logs show a successful Postgres connection; re-running
+  the app does not re-apply migrations; a deliberately failing migration leaves
+  `schema_migrations` unchanged (transaction rollback).
 - **T1.2** `Recipe` JSON Schema in `docs/` (source of truth — the **locked field list**
-  above); SQL migrations (`users` stub, `recipes` with nullable `owner_id`, **the recipe
-  metadata columns — `tags`, `prep_time_min`, `cook_time_min`, `notes`, `favorite`** —
-  **and macro columns — per-serving cal/protein/carbs/fat, `total_weight_g`,
-  `macro_source`**, `ingredients` **with nullable `quantity`/`unit`/`group`/`food_id`/`note`
-  and a language-neutral unit vocabulary**, `images`); C++ model structs + jsoncpp
-  (de)serialization + a **`valijson` validation function**. *Verify:* migrations apply on
-  a fresh DB; unit test round-trips a `Recipe` struct↔JSON — including a **grouped,
-  to-taste-ingredient recipe** (null quantity/unit) and an **empty-`steps`** recipe — and
-  `valijson` **rejects a schema-invalid document** and accepts a valid one.
+  above; authored to **JSON Schema Draft 7** with the matching `"$schema"`, the draft
+  valijson supports — Q4); SQL migrations for the **relational shape decided in D2/B1**:
+  `users` stub; `recipes` (nullable `owner_id`, scalar fields, **per-serving macro columns
+  cal/protein/carbs/fat, `total_weight_g`, `macro_source`**); **child tables
+  `recipe_ingredients`** (FK, `position`, nullable `quantity`/`unit`/`group`/`food_id`/`note`,
+  language-neutral unit vocabulary), **`recipe_steps`** (FK, `position`, `text`),
+  **`recipe_images`** (FK, `position`, `url`); **join table `recipe_tags`** (`recipe_id`,
+  `tag`); C++ model structs + jsoncpp (de)serialization that **assemble/emit the canonical
+  `Recipe` JSON from these tables** + a **`valijson` validation function**. *Verify:*
+  migrations apply on a fresh DB; unit test round-trips a `Recipe` struct↔JSON (via the
+  child tables) — including a **grouped, to-taste-ingredient recipe** (null quantity/unit),
+  ordered `steps`, and an **empty-`steps`** recipe — and `valijson` **rejects a
+  schema-invalid document** and accepts a valid one.
 - **T1.3** Recipe repository/service (create, read, list, update, delete) via Drogon
-  `DbClient` (`execSqlSync`); per-100 g derived computation. *Verify:* integration tests
-  run against a **dedicated test Postgres** (compose service; migrations applied before
-  the suite) for CRUD, plus a unit test for per-100 g (incl. the "no weight" → null path).
+  `DbClient` (`execSqlSync`) — writing/reading across the parent + child tables in a
+  transaction; per-100 g derived computation. *Verify:* integration tests run against a
+  **dedicated test Postgres** (compose service; migrations applied before the suite; **each
+  test truncates the recipe tables** for determinism — Q1) for CRUD incl. a
+  multi-group/multi-step recipe, plus a unit test for per-100 g (incl. the "no weight" →
+  null path).
 - **T1.4** REST controllers `GET /api/recipes` (list) and `GET /api/recipes/:id`; seed
   2–3 example recipes. *Verify:* integration test hits both endpoints and gets the seeded
   recipes as schema-valid `Recipe` JSON.
 
 ## Milestone 2 — Frontend scaffold, browse/detail, structured form
-- **T2.1** Angular CLI scaffold (pinned major version) + **dev `proxy.conf.json`**
+- **T2.1** Angular CLI scaffold (**exact pinned version `17.x.y`**, not `^17` — Q3) + **dev `proxy.conf.json`**
   (`/api` → backend) + typed API service (`HttpClient`) + browse list page + detail page
   rendering title, image, source link, ingredients, steps, and both macro tables.
   *Verify:* `ng build` passes and `ng test` runs green using **ChromeHeadlessNoSandbox**
@@ -321,35 +431,47 @@ addition, not a migration.
   `Kohlenhydrate`/`Carbs`/`C`; `Fett`/`Fat`/`F`) in any order → `macrosPerServing`,
   `macroSource: "manual"`; **hashtag walls + emoji stripped** (never auto-tagged);
   **to-taste rows** (`Salz + Pfeffer`, `Petersilie zum garnieren`) → null quantity/unit;
-  and any **storage/reheating block → `notes`**. Steps may be absent (video-only). *Verify:*
-  unit tests parse the three representative captions into the expected structured fields,
-  including grouping, null-quantity rows, the extracted macro block, and empty steps.
-- **T3.2** `LlmClient` + `LlmParser` (OpenAI-compatible call, schema validation, fallback
-  on invalid). Documented fallback = on invalid/unparseable LLM JSON, return a
-  **best-effort or empty draft into the editable preview with a warning** (no auto-retry,
-  no silent save). *Verify:* unit test with a **mocked** HTTP/LLM response asserts valid
-  JSON is accepted and malformed JSON triggers that documented fallback — an empty/partial
-  draft plus a warning flag, not an exception or a saved record (no live LLM in tests).
+  and any **storage/reheating block → `notes`**. Steps may be absent (video-only).
+  **UTF-8 handling per D4/B3: use RE2 (not `std::regex`), codepoint-range emoji/symbol
+  stripping, and line-start-anchored quantities** so `140ml … 7%` doesn't misread `7`.
+  *Verify:* unit tests parse the three representative captions into the expected structured
+  fields, including grouping, null-quantity rows, the extracted macro block, empty steps,
+  **correct emoji/umlaut handling (`Eiweiß`, `Hähnchen`) and the `7%`-not-a-quantity case**.
+- **T3.2** `LlmClient` (on the **`HttpClient` seam** from D3/B2) + `LlmParser` (Ollama
+  native `/api/chat` `format`=schema by default, OpenAI-compatible fallback; schema
+  validation; fallback on invalid). Documented fallback = on invalid/unparseable LLM JSON,
+  return a **best-effort or empty draft into the editable preview with a warning** (no
+  auto-retry, no silent save). *Verify:* unit test with the **fake `HttpClient`** (no live
+  LLM, no real libcurl) asserts valid JSON is accepted and malformed JSON triggers that
+  documented fallback — an empty/partial draft plus a warning flag, not an exception or a
+  saved record.
 - **T3.3** Paste screen: textarea, engine toggle (rule-based / local LLM), parse →
   **editable preview form** (reuses M2 form) → save. *Verify:* pasting a sample with the
   rule-based engine produces a pre-filled, editable form that saves correctly.
 
 ## Milestone 4 — Macros from Open Food Facts (search & pick) + LLM estimate
-- **T4.1** `NutritionSource` interface + **OFF client** (libcurl → OFF `/cgi/search.pl`,
-  **descriptive `User-Agent`**, 429/backoff handling) + migration adding the **`foods`
-  cache table (keyed by barcode `code`) + `ingredients.food_id`** + `GET /api/foods/search?q=`
-  (**local `foods` first, live OFF only when insufficient**, then persist picked results) +
-  the per-100 g nutrient mapping (`energy-kcal_100g`, else `energy_100g ÷ 4.184`;
-  proteins/carbohydrates/fat `_100g`) + density-aware **unit→gram converter**. *Verify:*
-  unit test with a **mocked** OFF response returns candidates; **resolving an
-  already-picked food (by `food_id`/barcode) makes no API call** (cache hit); a **kJ-only
-  mock** is converted (or rejected), never summed raw; unit-conversion tests (g/kg/ml/l +
-  common units) incl. the "no density → flagged" path.
+- **T4.1** `NutritionSource` interface + **OFF client** (on the **`HttpClient` seam**
+  from D3/B2 → OFF **Search-a-licious `/api/v2/search`** primary, legacy `/cgi/search.pl`
+  fallback; **descriptive `User-Agent`**; 429/backoff) + migration adding the **`foods`
+  cache table (keyed by barcode `code`) + `recipe_ingredients.food_id`** + `GET
+  /api/foods/search?q=` (**local `foods` first, live OFF only when insufficient**, then
+  persist picked results) + the per-100 g nutrient mapping (`energy-kcal_100g`, else
+  `energy_100g ÷ 4.184`; proteins/carbohydrates/fat `_100g`) + a **unit→gram converter with
+  the density table AND the M2 piece-weight / spoon-volume table**. **First confirm the
+  current OFF rate limits against the live docs (M1)** — do not hard-code the old
+  "~100/min" figure — and size backoff conservatively. *Verify:* unit test with the **fake
+  `HttpClient`** returns candidates; **resolving an already-picked food (by
+  `food_id`/barcode) makes no API call** (cache hit); a **kJ-only mock** is converted (or
+  rejected), never summed raw; unit-conversion tests (g/kg/ml/l + **piece units like
+  `Knoblauchzehen`/`Zwiebel` and spoons `TL`/`EL`**) incl. the "no table entry, no density
+  → flagged" path.
 - **T4.2** Macro engine: for ingredients with a picked `foodId`, sum `quantity × per-100 g`
   → totals → per-serving + per-100 g. Ingredients with **no pick**, a product **missing
   `*_100g` nutriments**, or an **unresolvable unit** are surfaced to the UI (never zeroed),
-  and any of them makes `totalWeightG` partial → per-100 g renders **"—"**. *Verify:* unit
-  test on a recipe of fully-picked, gram-resolved foods gives expected macros **within a
+  and any of them makes `totalWeightG` partial → per-100 g renders **"—"**. *Verify:* a
+  **representative fixture-style recipe** (mixing g, a piece unit, and a spoon unit — i.e.
+  resolved via the M2 table, not only exact grams) computes a full `totalWeightG` and
+  correct per-serving + per-100 g **within a
   defined tolerance** (e.g. ±5%); a recipe with an unpicked/flagged ingredient reports it
   and shows per-100 g as "—".
 - **T4.2b** `POST /api/macros/compute` + the frontend **search-and-pick UI** (per
@@ -364,9 +486,13 @@ addition, not a migration.
   user can still override before save.
 
 ## Milestone 5 — Media, polish, search
-- **T5.1** Image upload endpoint (Drogon multipart → disk volume) + external-URL option;
-  type/size validation. *Verify:* uploading a valid image attaches it to a recipe and
-  renders; oversized/wrong-type is rejected (API test).
+- **T5.1** Image upload endpoint (Drogon multipart → disk volume) + external-URL option
+  (**store-only, no server-side fetch — M6b/SSRF**). Concrete validation per D6/M6:
+  **server-generated filename** (UUID + extension, client filename ignored — no path
+  traversal), **size ≤ 8 MB**, **content-type ∈ {jpeg,png,webp} verified by magic bytes**.
+  *Verify:* uploading a valid image attaches it and renders; **oversized, wrong-type, and a
+  crafted path-traversal filename are all rejected**; an external image URL is stored and
+  **never fetched by the backend** (API test asserts no outbound request).
 - **T5.2** Browse **search/filter/sort** via `GET /api/recipes` query params + SQL
   (locked at GATE 0): **title text** search (case-insensitive substring on `title`,
   optionally `description`); **tag filter** (multi-select, **AND** semantics); a
@@ -378,24 +504,29 @@ addition, not a migration.
   `minProtein`/`maxCalories` range, and confirm each sort order.
 
 ## Milestone 6 — Deployment & docs
-- **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime) +
-  Angular `ng build` static bundle served by nginx with a **`location /api/ { proxy_pass
-  → backend }`** block (same-origin in prod) + `docker-compose.yml` (backend, frontend,
-  postgres volume; `LLM_BASE_URL` → external Ollama) + `.env.example`. *Verify:* `docker
-  compose up` builds and serves the app; browse works against a persisted Postgres
-  volume; `/api/*` is reachable through nginx.
+- **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime), using a
+  **vcpkg binary cache (or a prebuilt-deps base image)** so Drogon's dependency tree isn't
+  recompiled every build (Q8) + Angular `ng build` static bundle served by nginx with a
+  **`location /api/ { proxy_pass → backend }`** block **and a `location /uploads/`** block
+  (same-origin in prod; nginx serves uploads — M6) + `docker-compose.yml` (backend,
+  frontend, postgres volume; `LLM_BASE_URL` → external Ollama) + `.env.example`. *Verify:*
+  `docker compose up` builds and serves the app; browse works against a persisted Postgres
+  volume; `/api/*` and `/uploads/*` are reachable through nginx.
 - **T6.2** `docs/` usage + config (env vars, pointing at Ollama, Postgres backup, C++
-  build/vcpkg notes, Angular build notes). **Verify the exact Ollama pull tag** for the
-  documented `LLM_MODEL` (`ollama list`) and put a resolvable tag in `.env.example`. *Verify:* a **concrete copy-pasteable
-  sequence** from the docs succeeds: `docker compose up` → `curl /health` returns 200 →
-  `POST` a sample recipe → it appears in `GET /api/recipes`.
+  build/vcpkg notes, Angular build notes, **and the minimum build RAM** so a small VPS
+  doesn't OOM — Q8). **Verify the exact Ollama pull tag** for the documented `LLM_MODEL`
+  (`ollama list`) and put a resolvable tag in `.env.example`. *Verify:* a **concrete
+  copy-pasteable sequence** from the docs succeeds: `docker compose up` → `curl /health`
+  returns 200 → `POST` a sample recipe → it appears in `GET /api/recipes`.
 
 ---
 
 ## Open questions for the human (GATE 0)
 _Resolved this session (all locked): `Recipe` field list; browse/search scope (T5.2);
 paste-parser depth + source scope (D4 — social captions only); LLM model policy +
-no-translation (D3); milestone order (deploy stays M6). Remaining sign-off questions:_
+no-translation (D3); milestone order (deploy stays M6); **per-100 g gap (M2) → add a
+piece-weight/spoon-volume table so it resolves for real recipes**; **scope (Q2) → keep all
+six milestones**. Remaining sign-off questions:_
 1. **Auth seam default:** OK to include the auth-ready schema (users stub + nullable
    `owner_id`) now with **no auth implemented**, per D2/D6?
 2. **Scope:** all six milestones this phase, as laid out?
@@ -404,6 +535,52 @@ _Stack is settled: Angular SPA + C++/Drogon backend + PostgreSQL._
 
 ## Reviewer notes
 _(newest round first)_
+
+**Round 6** (deep external review — two independent passes, one blind cross-check;
+`PLAN_REVIEW_recipe_app_foundation.md`): **CHANGES REQUIRED** — the workflow reviewer
+(Rounds 1–5) checked structure/consistency well but missed implementability depth and
+fact-checking. `approvals.reviewer` was **rolled back to pending**. Findings + resolutions:
+- _B1 storage shape never decided (JSONB vs relational)_ → *Fixed*: D2 pins a **relational
+  shape** — `recipes` + child tables `recipe_ingredients`/`recipe_steps`/`recipe_images`
+  (with `position`) + join table `recipe_tags`; T1.2/T1.3 build to it; T5.2 tag-AND SQL
+  uses `recipe_tags`.
+- _B2 no HTTP-client seam but tests mock HTTP_ → *Fixed*: D3 adds an **`HttpClient`
+  interface** (libcurl impl + fake) that `LlmClient` and the OFF client use; T3.2/T4.1/T4.3
+  verify via the fake.
+- _B3 UTF-8/emoji/umlaut unaddressed (`std::regex` not UTF-8-aware)_ → *Fixed*: D4/T3.1
+  pin **RE2** (added to T1.1 manifest) + codepoint-range emoji stripping + line-start-
+  anchored quantities (the `7%` trap); tests assert `Eiweiß`/`Hähnchen`/`7%`.
+- _M1 OFF product limit wrong (~100/min) + legacy endpoint pinned_ → *Fixed*: D5/T4.1 make
+  **Search-a-licious** primary, legacy `/cgi/search.pl` a fallback, and require confirming
+  **current** limits against live docs before sizing backoff (don't hard-code 100 or 15).
+- _M2 per-100 g renders "—" for essentially all real recipes_ → **Decided (human): add a
+  piece-weight/spoon-volume table** (D5) + use OFF `serving_size` so common piece/spoon
+  units resolve; T4.2 verify uses a representative mixed-unit recipe, not a synthetic
+  fully-gram one.
+- _M3 `execSqlSync` blocks the event loop; "off the event loop" had no mechanism_ →
+  *Fixed*: D2 drops the false claim, states blocking is accepted for single-user, and sizes
+  the pool via `setThreadNum`.
+- _M4 OFF whole-food data quality is the real risk_ → *Fixed*: D5 documents it as a real
+  (relocated, not solved) limitation; mitigations = prefer complete-nutriment products,
+  manual override, future USDA seam.
+- _M5 Ollama OpenAI `response_format` is the less-reliable path_ → *Fixed*: D3 defaults to
+  the **native `/api/chat` `format`**=schema, OpenAI surface as fallback.
+- _M6 security (upload/SSRF/TLS)_ → *Fixed*: D6/T5.1 — server-generated filenames, ≤8 MB +
+  magic-byte type check, **external URL store-only (no fetch)**, nginx serves uploads,
+  **basic-auth over TLS** required.
+- _Q1 test framework unnamed_ → **Catch2** (T1.1) + truncate-between-tests (T1.3).
+  _Q2 scope_ → **Decided (human): keep all six milestones.**
+  _Q3 Angular "v17+" not a pin_ → exact `17.x.y` (D1/T2.1). _Q4 valijson draft_ → **Draft
+  7** + `$schema` (D2/T1.2). _Q5 model tags_ → already illustrative; T6.2 verifies.
+  _Q6 schemaVersion oversold_ → softened (D2). _Q7 migration lock_ → advisory lock +
+  per-migration transaction (D2/T1.1). _Q8 Docker build cost_ → vcpkg binary cache + build
+  RAM note (D6/T6.1/T6.2). _Q9 3 representations drift_ → noted + codegen as future (D1).
+  _Q10 raw vs cooked weight_ → documented caveat (D5)._
+Awaiting a fresh reviewer pass on these fixes, then the human signature.
+
+**Round 5** (diff-only confirm on Round 4 fixes): returned APPROVE and was briefly stamped
+`2026-08-24` — **superseded/rolled back** after the Round 6 external review found the B1–B3
+blocking gaps above. Kept for history.
 
 **Round 4** (re-confirm on this session's deltas — D4 parser scope, D3 LLM policy,
 milestone order): **CHANGES REQUIRED** — 1 blocking, 4 non-blocking. All addressed:
@@ -418,8 +595,6 @@ milestone order): **CHANGES REQUIRED** — 1 blocking, 4 non-blocking. All addre
   illustrative; T6.2 must verify the exact `ollama pull` tag for `.env.example`.
 - _NB4 `LLM_MODEL` had no defined unset behaviour_ → *Fixed*: D3 states no baked default
   (documentation-only); if unset, the LLM engine is unavailable and the toggle disabled.
-**Round 5** (diff-only confirm on the Round 4 fixes): **APPROVE** — all five findings
-resolved, no new inconsistency. Reviewer signature stamped `2026-08-24`.
 
 **Round 1** (TS/SvelteKit stack, superseded): APPROVE with 8 non-blocking; findings
 folded into D3/D5 before the stack changed.
