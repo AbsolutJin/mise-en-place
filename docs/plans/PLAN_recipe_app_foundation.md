@@ -42,9 +42,12 @@ addition, not a migration.
 
 - **Backend:** **C++17/20, no web framework** — the app builds its own small libraries:
   - **HTTP server** — a TCP listener over OS sockets, an **HTTP/1.1 request parser**
-    (request line, headers, body, `Content-Length`/chunked), keep-alive, a **thread pool**
-    for concurrency. (**multipart/form-data** parsing is added into `net` when first needed,
-    at M5/T5.1 — not part of the M0 server scope.)
+    (request line, headers, body, `Content-Length`/chunked), keep-alive. The server starts
+    **single-threaded** (one connection handled at a time); a **thread pool for concurrency**
+    is added **last in M0 (T0.9)**, once everything else works — deferred deliberately so the
+    concurrency model is built after the fundamentals, not fought alongside them. (**multipart/
+    form-data** parsing is added into `net` when first needed, at M5/T5.1 — not part of the M0
+    server scope.)
   - **Router** — method + path (with `:id` params) → handler; a request/response abstraction.
   - **JSON** — own parser + serializer (replaces jsoncpp) and own **JSON-Schema validation**
     to the extent the `Recipe`/`Macros` schema needs (replaces valijson).
@@ -63,7 +66,9 @@ addition, not a migration.
     a Docker *tag* is a mutable pointer and `apt install` (unpinned) pulls whatever the mirror
     serves. Minimum honest hardening: **pin the base image by digest (`FROM debian@sha256:…`),
     not tag** (T6.1) + a documented `apt` list (T6.2); optionally pin apt versions against
-    `snapshot.debian.org`. CMake finds the libs via `find_package`/`pkg-config`.
+    `snapshot.debian.org`. A plain **GNU Makefile** finds the libs via `pkg-config`
+    (`pkg-config --cflags --libs libpq openssl libutf8proc`); see the T0.1 note on why Make,
+    not CMake.
 - **Frontend:** **Angular SPA** (Angular CLI, `ng build` → static bundle), served as
   static files; it calls the backend over HTTP at `/api/*`. Chosen to learn a robust,
   structured framework; its **Reactive Forms** suit the dynamic ingredient-row form and
@@ -77,7 +82,7 @@ addition, not a migration.
   the own HTTP layer adds the CORS response headers.
 - **Monorepo layout:**
   ```
-  /backend    C++ from-scratch API (CMake; libpq/OpenSSL/utf8proc/Catch2 via system apt packages)
+  /backend    C++ from-scratch API (GNU Makefile; libpq/OpenSSL/utf8proc/Catch2 via system apt packages)
     /lib          our libraries: /net (sockets+http server) /router /json /jsonschema /db /httpclient
     /app          /controllers  /models  /services  /migrations
     /tests
@@ -128,17 +133,21 @@ addition, not a migration.
   API — connect (from our own connection pool), **parameterized `exec`** (`$1,$2…` binds,
   never string-concatenated SQL → no injection), and result→struct mapping — kept synchronous
   to stay approachable while learning.
-- **Threading (own thread pool):** the HTTP server (D1) dispatches each request to a
-  **worker thread** from our pool; a worker owns a libpq connection for the request and the
+- **Threading (own thread pool) — built LAST in M0 (T0.9):** the server runs
+  **single-threaded through T0.8** (accept → handle → respond, one connection at a time), which
+  is enough for a single user and keeps the whole M0 slice working before concurrency is
+  introduced. **T0.9 then adds the thread pool:** the HTTP server (D1) dispatches each request
+  to a **worker thread** from our pool; a worker owns a libpq connection for the request and the
   blocking `exec`/HTTPS calls happen on that worker, never on the accept loop. For a
   **single user** a small pool (e.g. 4–8 workers) is ample; we do **not** claim non-blocking
   I/O — blocking a worker is fine at this scale. (This is where building it ourselves teaches
-  the concurrency model a framework would have hidden.)
+  the concurrency model a framework would have hidden — which is exactly why it is done last,
+  once sockets/parsing/routing/DB already work, not entangled with learning the basics.)
 - **Dependencies via system packages (no vcpkg):** the only externals are **libpq**,
   **OpenSSL**, **utf8proc**, and **Catch2**, installed with **`apt`** (`libpq-dev`,
   `libssl-dev`, `libutf8proc-dev`, `catch2`/`libcatch2-dev`) in dev (WSL) and in the Docker
-  build stage. CMake locates them
-  with `find_package`/`pkg-config`. No framework, no dependency manager. (Reproducibility
+  build stage. The **Makefile** locates them
+  with `pkg-config`. No framework, no dependency manager. (Reproducibility
   rests on pinned distro/base-image versions per D1; the build compiles **none** of these
   from source, so it is fast and light — Q8.)
 - **JSON + schema validation are OURS (D1):** own parser/serializer, and own validation of
@@ -482,20 +491,28 @@ addition, not a migration.
 > New milestone from the 2026-08-24 from-scratch pivot (D1). Builds the plumbing a framework
 > would have given us, so later milestones have libraries to stand on. Everything here is
 > unit-tested in isolation; no recipe logic yet.
-- **T0.1** Toolchain + project skeleton: **CMake** (pin **C++20** — 5th-review minor, one
-  standard not "C++17/20") finding the **system (apt) packages** `libpq-dev`, `libssl-dev`,
-  `libutf8proc-dev`, `catch2`/`libcatch2-dev` via `find_package`/`pkg-config` (no vcpkg, no
-  framework) + the `/backend/lib` (`/net /router /json /jsonschema /db /httpclient`) + `/app`
-  + `/tests` layout (D1) + a Catch2 test target. **An `ASAN+UBSAN` build config
+- **T0.1** Toolchain + project skeleton: a plain **GNU Makefile** (pin **C++20** — 5th-review
+  minor, one standard not "C++17/20") finding the **system (apt) packages** `libpq-dev`,
+  `libssl-dev`, `libutf8proc-dev`, `catch2`/`libcatch2-dev` via **`pkg-config`**
+  (`pkg-config --cflags --libs libpq openssl libutf8proc`; no vcpkg, no framework) + the
+  `/backend/lib` (`/net /router /json /jsonschema /db /httpclient`) + `/app` + `/tests` layout
+  (D1) + a Catch2 test target. **Why Make, not CMake:** the build is **Linux-only** (dev in
+  WSL2, deploy on Linux behind a VPN — D6), so CMake's main payoff (cross-platform generation)
+  buys nothing here, while a hand-written Makefile is simpler and keeps the actual compile/link
+  invocations visible — which suits the learn-the-fundamentals goal (D1). If a Windows target
+  is ever added, revisiting CMake is a clean later switch. **An `ASAN+UBSAN` build config
   (`-fsanitize=address,undefined`) the Catch2 suite runs under (5th-review S2 — the #1 safety
-  net for hand-rolling four untrusted-input parsers), plus TSan coverage for the T0.6 pool.**
-  Also **stand up the dev `docker-compose` Postgres service here** (moved earlier so all of M0
-  can talk to a DB — 5th-review P3). Dev happens in **WSL2 (Ubuntu)**. *Verify:* `cmake
-  --build` succeeds; a trivial Catch2 test runs green **under ASAN+UBSAN**; the dev Postgres
-  container comes up.
+  net for hand-rolling four untrusted-input parsers), as a Makefile target (e.g. `make asan`),
+  plus TSan coverage for the concurrency work (the T0.9 thread pool and the T0.6 db connection
+  pool).** Also **stand up the dev `docker-compose` Postgres service here** (moved earlier so
+  all of M0 can talk to a DB — 5th-review P3). Dev happens in **WSL2 (Ubuntu)**. *Verify:*
+  `make` builds; a trivial Catch2 test runs green **under ASAN+UBSAN** (`make asan`); the dev
+  Postgres container comes up.
 - **T0.2** `net` — TCP socket listener + **HTTP/1.1 request parser** (request line, headers,
-  body via `Content-Length` **and** chunked) + response writer + keep-alive + a **thread
-  pool** (D2). Hardening: cap header size / count **and total body size (enforced *during*
+  body via `Content-Length` **and** chunked) + response writer + keep-alive. **Single-threaded
+  for now** — one connection handled at a time; the **thread pool is deferred to T0.9** (D2),
+  so this task stays focused on correct socket handling and HTTP parsing without concurrency
+  in the mix. Hardening: cap header size / count **and total body size (enforced *during*
   chunked decode too, where there is no upfront `Content-Length`)**; reject malformed with
   `400`; a **socket read/idle timeout** (anti-slowloris). **RFC 7230 §3.3.3 framing / anti-
   smuggling (5th-review T2):** reject **both `Content-Length` and `Transfer-Encoding` present**,
@@ -561,6 +578,18 @@ addition, not a migration.
     a self-signed/expired host would pass while the code is still exploitable); a **plain-HTTP**
     GET to a local test server works; a chunked response decodes correctly; the fake
     `IHttpClient` remains what the T3.2/T4.1/T4.3 unit tests use.
+- **T0.9** `net` **concurrency — thread pool (built LAST in M0, deliberately).** Everything
+  through T0.8 runs single-threaded; this task adds the concurrency model the from-scratch goal
+  is really about (D2), now that sockets/parsing/routing/DB/HTTP-client all work in isolation.
+  Scope: a **fixed-size worker thread pool** (e.g. 4–8 workers, env-configurable); the accept
+  loop hands each accepted connection to a worker; **a worker owns one libpq connection from
+  the `db` pool (T0.6) for the life of the request**, and the blocking `exec`/HTTPS calls run
+  on the worker, never on the accept loop (D2). Bound the work queue; shut the pool down
+  cleanly (drain in-flight, join workers). **Build + test this under TSan** (the config stood
+  up in T0.1) — this and the T0.6 connection pool are the two places data races can live.
+  *Verify:* the server handles **concurrent** keep-alive clients correctly (no interleaved/
+  corrupted responses); **TSan is clean** under concurrent load; the pool bounds its queue
+  rather than growing unboundedly; a clean shutdown drains and joins with no leak (ASAN clean).
 - **🚦 M0 review** — `workflow:review` at the boundary passes _(the libraries are the
   foundation everything else stands on — worth a careful read)._
 
@@ -856,6 +885,29 @@ schema/DB-over-libpq/HTTP-client; externals = libpq, OpenSSL, Catch2)** + Postgr
 
 ## Reviewer notes
 _(newest round first)_
+
+**Post-approval human-directed revision — build tool + M0 sequencing (2026-08-25)**
+After GATE 0, an experienced-C++ friend reviewed the ROADMAP and made two points the human
+chose to adopt. **Neither touches the frozen D1 architecture** (no framework, package-manager,
+or from-scratch-scope change), so the standing GATE 0 approval is not reopened by them — they
+are a build-tooling swap and an intra-M0 task reorder:
+1. **CMake → plain GNU Makefile.** The build is Linux-only (WSL2 dev, Linux deploy — D6), so
+   CMake's cross-platform payoff buys nothing while adding ceremony; a hand-written Makefile is
+   simpler and keeps compile/link visible (suits the learn-the-fundamentals goal). Updated: D1
+   (layout comment + `pkg-config` line), D2 (Makefile locates libs), T0.1 (Makefile + `make`/
+   `make asan`, with the rationale). CMake stays a clean later switch if a Windows target is
+   ever added.
+2. **Thread pool moved to LAST in M0.** The friend's advice — "hang SSL and multithreading on
+   the end if you're really hand-rolling it, else it's too much." SSL was already last (T0.8);
+   the thread pool was front-loaded in T0.2. Now the server runs **single-threaded through
+   T0.8** and the pool becomes **new task T0.9** (right before the M0 review), built once the
+   rest works — de-risking the TSan/race learning curve. Updated: D1 + D2 (single-threaded
+   first, pool at T0.9), T0.2 (thread pool removed), **new T0.9** (pool + concurrent dispatch,
+   worker-owns-a-db-connection, TSan-verified), T0.1 (TSan now covers the T0.9 pool + the T0.6
+   db pool). T0.1–T0.8 numbers unchanged.
+_The friend also suggested dropping Docker; the human **deferred** that to M6 (dev Postgres
+stays in Docker for now; the deploy-Docker question is revisited when M6 is reached) — no plan
+change made for it yet._
 
 **5th external review — consolidated, targets the from-scratch M0 (2026-08-24)**
 (`docs/reviews/PLAN_REVIEW_2026-08-24_external-5-consolidated.md`): confirmed **all 4th-review
