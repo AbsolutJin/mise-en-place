@@ -8,421 +8,484 @@ approvals:
 
 # Plan — mise-en-place recipe app (foundation)
 
-## Goal
-Build a **single-user, self-hosted** web app to store, browse, and add recipes.
-Recipes are added via a **structured form** or by **pasting free text** (TikTok /
-Instagram caption), which is normalised into one **standardised
-recipe format**. (Pasted website text and URL/HTML import are a later phase — see D4.) Recipes render with optional image(s), an optional source link,
-and **macros shown both per portion and per 100 g**. Macros are **auto-computed
-from ingredients** via a nutrition database, with a **button to LLM-estimate**
-instead. Paste-parsing and macro-estimation each offer a **user-selectable engine:
-rule-based or a local LLM** (HTTP API, e.g. Ollama).
+## Ziel
+Eine selbst-gehostete Web-App für eine Person, um Rezepte zu speichern, zu
+durchstöbern und anzulegen. Rezepte kommen über ein strukturiertes Formular
+herein oder durch das Einfügen von Freitext (TikTok-/Instagram-Caption), der in
+ein einheitliches Rezeptformat normalisiert wird. (Eingefügter Website-Text und
+URL/HTML-Import sind eine spätere Phase — siehe D4.) Rezepte zeigen optionale
+Bilder, einen optionalen Quell-Link und Makros pro Portion und pro 100 g. Die
+Makros werden aus einer Nährwert-Datenbank aus den Zutaten berechnet, alternativ
+per LLM geschätzt (Button). Paste-Parsing und Makro-Schätzung bieten je eine
+wählbare Engine: regelbasiert oder ein lokales LLM (HTTP-API, z. B. Ollama).
 
-This plan covers the **product foundation** (all core features end-to-end) across
-**seven milestones (M0 core libraries + M1–M6)** — M0 was added by the from-scratch pivot
-(D1). It is the first workflow phase; later phases (advanced search,
-tagging, meal planning, authentication, and **website-text / URL import** — see D4)
-are out of scope here — but the schema is built **auth-ready** so auth is a later
-addition, not a migration.
+Dieser Plan deckt das Produkt-Fundament ab — alle Kernfeatures end-to-end — über
+sieben Milestones (M0 Core-Bibliotheken + M1–M6). M0 kam mit der
+From-scratch-Wende dazu (D1). Es ist die erste Workflow-Phase; spätere Phasen
+(erweiterte Suche, Tagging, Meal-Planning, Authentifizierung und Website-Text-/
+URL-Import — siehe D4) liegen hier außerhalb des Scopes. Das Schema wird aber
+auth-ready gebaut, sodass Auth eine spätere Ergänzung ist, keine Migration.
 
-## Locked design decisions
-> These are the decisions agreed with the human at GATE 0. A **C++ backend was
-> explicitly chosen to learn C++**, and (revised 2026-08-24) the human chose to build it
-> **from scratch — no web framework** — because building the fundamentals (an HTTP server,
-> router, JSON, a DB layer over libpq, an HTTP client) is the point. This is a deliberate,
-> knowing trade of substantial extra plumbing for that learning; the plan front-loads a
-> **core-libraries milestone (M0)** so later milestones stand on our own libs.
+## Festgelegte Design-Entscheidungen
+> Diese Entscheidungen wurden mit dem Menschen bei GATE 0 vereinbart. Ein
+> C++-Backend wurde bewusst gewählt, um C++ zu lernen; und (überarbeitet
+> 2026-08-24) der Mensch entschied, es from scratch zu bauen, ohne Web-Framework
+> — weil der Bau der Grundlagen (ein HTTP-Server, Router, JSON, eine DB-Schicht
+> über libpq, ein HTTP-Client) der Punkt ist. Das ist ein bewusster Tausch: viel
+> zusätzliche Plumbing-Arbeit gegen dieses Lernen. Der Plan stellt deshalb einen
+> Core-Bibliotheken-Milestone (M0) an den Anfang, damit spätere Milestones auf
+> eigenen Libs stehen.
 
-### D1 — Architecture: split frontend + **from-scratch** C++ backend (monorepo)
-> **Revised 2026-08-24 — the human chose to build the backend "from sockets up" rather than
-> use a web framework, because building the fundamentals is the point of the learn-C++ goal.**
-> This trades a large amount of up-front plumbing for that learning, and is accepted knowingly.
-> Deploy target is Linux behind a VPN (D6), which bounds the security exposure of a hand-rolled
-> HTTP server. Dev happens in **WSL2 (Ubuntu)** on the same OS family as deploy.
+### D1 — Architektur: getrenntes Frontend + C++-Backend from scratch (Monorepo)
+> Überarbeitet 2026-08-24 — der Mensch entschied, das Backend „von den Sockets
+> aufwärts" zu bauen statt ein Web-Framework zu nutzen, weil der Bau der
+> Grundlagen der Punkt des Lernziels C++ ist. Das tauscht viel Vorab-Plumbing
+> gegen dieses Lernen, bewusst akzeptiert. Deploy-Ziel ist Linux hinter einem VPN
+> (D6), was die Sicherheits-Exposition eines selbst gebauten HTTP-Servers
+> eingrenzt. Entwickelt wird in WSL2 (Ubuntu), auf derselben OS-Familie wie das
+> Deploy.
 
-- **Backend:** **C++17/20, no web framework** — the app builds its own small libraries:
-  - **HTTP server** — a TCP listener over OS sockets, an **HTTP/1.1 request parser**
-    (request line, headers, body, `Content-Length`/chunked), keep-alive. The server starts
-    **single-threaded** (one connection handled at a time); a **thread pool for concurrency**
-    is added **last in M0 (T0.9)**, once everything else works — deferred deliberately so the
-    concurrency model is built after the fundamentals, not fought alongside them. (**multipart/
-    form-data** parsing is added into `net` when first needed, at M5/T5.1 — not part of the M0
-    server scope.)
-  - **Router** — method + path (with `:id` params) → handler; a request/response abstraction.
-  - **JSON** — own parser + serializer (replaces jsoncpp) and own **JSON-Schema validation**
-    to the extent the `Recipe`/`Macros` schema needs (replaces valijson).
-  - **DB layer** — a thin C++ wrapper over **libpq** (connect from a pool, parameterized
-    `exec`, map results to structs). libpq speaks the Postgres wire protocol; we do NOT
-    reimplement that — using libpq is using Postgres's own client, not a framework.
-  - **HTTP client** — own client over sockets + **OpenSSL** for HTTPS (to OFF and the LLM;
-    replaces libcurl), behind the `IHttpClient` seam (D3).
-  - **Irreducible externals** (via **system packages / `apt`** — no package manager): **libpq**
-    (PG protocol), **OpenSSL** (TLS), **utf8proc** (Unicode NFC normalization for the parser —
-    hand-rolling full NFC needs Unicode tables, so we take this one small lib; 4th-review Major),
-    and a **test framework** (Catch2). Everything else is ours.
-    **No vcpkg** — the human chose system packages, knowingly trading vcpkg's reproducible,
-    checked-in version pinning for a simpler, dependency-manager-free build. **This is only
-    "reproducible within a distro-release window," not exactly reproducible (5th-review T1):**
-    a Docker *tag* is a mutable pointer and `apt install` (unpinned) pulls whatever the mirror
-    serves. Minimum honest hardening: **pin the base image by digest (`FROM debian@sha256:…`),
-    not tag** (T6.1) + a documented `apt` list (T6.2); optionally pin apt versions against
-    `snapshot.debian.org`. A plain **GNU Makefile** finds the libs via `pkg-config`
-    (`pkg-config --cflags --libs libpq openssl libutf8proc`); see the T0.1 note on why Make,
-    not CMake.
-- **Frontend:** **Angular SPA** (Angular CLI, `ng build` → static bundle), served as
-  static files; it calls the backend over HTTP at `/api/*`. Chosen to learn a robust,
-  structured framework; its **Reactive Forms** suit the dynamic ingredient-row form and
-  editable paste-preview particularly well. **Pin an exact Angular version** (a specific
-  `17.x.y`, not "v17+") in `package.json` up front — a floor like `^17` lets a fresh build
-  pull a newer major with different builder/test defaults, the exact drift a pin prevents.
-- **Same-origin strategy (no CORS):** in **dev**, `ng serve` (:4200) proxies `/api` →
-  the backend via `frontend/proxy.conf.json` (`ng serve --proxy-config`); in **prod**,
-  nginx serves the static bundle and **reverse-proxies `/api/*`** to the backend (see T6.1).
-  Same-origin, so no browser CORS is needed. If any cross-origin path is later introduced,
-  the own HTTP layer adds the CORS response headers.
-- **Monorepo layout:**
+- **Backend:** C++17/20, kein Web-Framework — die App baut ihre eigenen kleinen
+  Bibliotheken:
+  - **HTTP-Server** — ein TCP-Listener über OS-Sockets, ein
+    HTTP/1.1-Request-Parser (Request-Line, Header, Body, `Content-Length`/chunked),
+    keep-alive. Der Server startet single-threaded (eine Verbindung zur Zeit); ein
+    thread pool für Nebenläufigkeit kommt zuletzt in M0 (T0.9), sobald alles andere
+    läuft — bewusst aufgeschoben, damit das Concurrency-Modell nach den Grundlagen
+    gebaut wird, nicht neben ihnen. (multipart/form-data-Parsing kommt in `net`,
+    sobald es zuerst gebraucht wird, bei M5/T5.1 — nicht Teil des M0-Server-Scopes.)
+  - **Router** — Method + Path (mit `:id`-Params) → Handler; eine
+    Request/Response-Abstraktion.
+  - **JSON** — eigener Parser + Serializer (ersetzt jsoncpp) und eigene
+    JSON-Schema-Validierung, so weit das `Recipe`/`Macros`-Schema es braucht
+    (ersetzt valijson).
+  - **DB-Schicht** — ein dünner C++-Wrapper über libpq (Connect aus einem Pool,
+    parametrisiertes `exec`, Mapping der Ergebnisse auf Structs). libpq spricht das
+    Postgres-Wire-Protokoll; das bauen wir NICHT nach — libpq zu nutzen heißt,
+    Postgres' eigenen Client zu nutzen, kein Framework.
+  - **HTTP-Client** — eigener Client über Sockets + OpenSSL für HTTPS (zu OFF und
+    dem LLM; ersetzt libcurl), hinter dem `IHttpClient`-Seam (D3).
+  - **Unvermeidbare Externals** (über System-Pakete / `apt` — kein
+    Package-Manager): libpq (PG-Protokoll), OpenSSL (TLS), utf8proc
+    (Unicode-NFC-Normalisierung für den Parser — volles NFC von Hand bräuchte
+    Unicode-Tabellen, also nehmen wir diese eine kleine Lib; 4th-review Major) und
+    ein Test-Framework (Catch2). Alles andere ist unseres. Kein vcpkg — der Mensch
+    wählte System-Pakete und tauscht bewusst vcpkgs reproduzierbares, eingechecktes
+    Version-Pinning gegen einen einfacheren Build ohne Dependency-Manager. Das ist
+    nur „reproduzierbar innerhalb eines Distro-Release-Fensters", nicht exakt
+    reproduzierbar (5th-review T1): ein Docker-*Tag* ist ein veränderlicher Zeiger,
+    und `apt install` (ungepinnt) zieht, was der Mirror gerade liefert. Minimale
+    ehrliche Härtung: die Base per Digest pinnen (`FROM debian@sha256:…`), nicht
+    per Tag (T6.1) + eine dokumentierte `apt`-Liste (T6.2); optional apt-Versionen
+    gegen `snapshot.debian.org` pinnen. Ein einfaches GNU-Makefile findet die Libs
+    über `pkg-config` (`pkg-config --cflags --libs libpq openssl libutf8proc`);
+    siehe die T0.1-Notiz, warum Make statt CMake.
+- **Frontend:** Angular-SPA (Angular CLI, `ng build` → statisches Bundle), als
+  statische Dateien ausgeliefert; ruft das Backend über HTTP unter `/api/*` auf.
+  Gewählt, um ein robustes, strukturiertes Framework zu lernen; seine Reactive
+  Forms passen besonders gut zum dynamischen Zutaten-Zeilen-Formular und zur
+  editierbaren Paste-Preview. Eine exakte Angular-Version vorab in `package.json`
+  pinnen (ein konkretes `17.x.y`, nicht „v17+") — eine Untergrenze wie `^17` lässt
+  einen frischen Build ein neueres Major mit anderen Builder-/Test-Defaults ziehen,
+  genau den Drift, den ein Pin verhindert.
+- **Same-origin-Strategie (kein CORS):** in dev proxyt `ng serve` (:4200) `/api` →
+  Backend über `frontend/proxy.conf.json` (`ng serve --proxy-config`); in prod
+  liefert nginx das statische Bundle und reverse-proxyt `/api/*` ans Backend (siehe
+  T6.1). Same-origin, also braucht der Browser kein CORS. Falls später ein
+  Cross-Origin-Pfad dazukommt, ergänzt die eigene HTTP-Schicht die
+  CORS-Response-Header.
+- **Monorepo-Layout:**
   ```
-  /backend    C++ from-scratch API (GNU Makefile; libpq/OpenSSL/utf8proc/Catch2 via system apt packages)
-    /lib          our libraries: /net (sockets+http server) /router /json /jsonschema /db /httpclient
+  /backend    C++-API from scratch (GNU-Makefile; libpq/OpenSSL/utf8proc/Catch2 über System-apt-Pakete)
+    /lib          eigene Bibliotheken: /net (Sockets+HTTP-Server) /router /json /jsonschema /db /httpclient
     /app          /controllers  /models  /services  /migrations
     /tests
-  /frontend   Angular SPA
+  /frontend   Angular-SPA
   /docs
   docker-compose.yml
   ```
-- **API conventions (2nd-review Major 4 + 5 — pinned once, used everywhere):**
-  - **Error envelope:** every non-2xx response is one JSON shape —
+- **API-Konventionen (2nd-review Major 4 + 5 — einmal festgelegt, überall
+  genutzt):**
+  - **Error-Envelope:** jede Nicht-2xx-Antwort hat eine JSON-Form —
     `{ "error": { "code": "<machine_slug>", "message": "<human text>", "details": <any?> } }`
-    — so the typed frontend service (T2.1) has one thing to code against.
-  - **Warning envelope (success path — 3rd-review minor #1):** a `200` that carries a soft
-    warning uses **one shape** — `{ "data": <payload>, "warning": { "code": "<slug>",
-    "message": "<text>" } }` — for all three degradation flows (`/api/foods/search`
-    cached-only; the parse LLM-invalid draft, T3.2; the LLM-macro fallback, T4.3). Absent
-    `warning` ⇒ a clean result.
-  - **Status codes:** `400` malformed request; `422` schema-invalid `Recipe`/macro body
-    (our own validator, M0 `jsonschema`, failure — with failing paths in `details`); `404` unknown `:id`; `504` upstream
-    timeout. **OFF-throttling behaviour for `/api/foods/search` (3rd-review minor #2):** if
-    any **local candidate** exists → `200` + cached results + `warning`; otherwise propagate
-    the upstream condition — OFF returned `429` → **`429`**; OFF unreachable → **`502`**;
-    OFF timeout → **`504`**. **LLM unreachable/timeout** on `/api/parse` and
-    `/api/macros/estimate` is **not** a 5xx: it degrades to the **`200` + warning-draft**
-    path (the best-effort/empty editable draft of T3.2/T4.3), so a down LLM never blocks
-    entry (consistent with D6) — the T3.2/T4.3 "invalid output" fallback and transport
-    failure share this path. Mutations use the error envelope: **`PUT`/`DELETE` target
-    `/api/recipes/:id`** (so the `404`-on-`:id` rule applies), and a successful **`DELETE`
-    returns `204`**.
-  - **List vs detail + pagination:** `GET /api/recipes` returns a **lightweight summary
-    projection** (id, title, first image, `favorite`, per-serving macros + **`macrosEstimated`
-    so the list can flag estimated macros too**, tags) — **not** full child-assembled
-    objects — and is **paginated** via `?limit=&offset=`; **`limit` defaults to 50 and is
-    clamped to a hard server-side maximum (e.g. 100)** so a large client `limit` cannot
-    defeat the bound (3rd-review minor #5). Full canonical `Recipe` (all child tables
-    assembled) is only `GET /api/recipes/:id`. This bounds the browse query as the store
-    grows.
-- **Trade-off accepted:** two build systems and two deploys; the `Recipe` type is
-  **not auto-shared** across C++/TS — three representations (JSON Schema, C++ struct, TS
-  type) are kept in sync **by hand** this phase, a known drift risk (Q9). Mitigated by D2
-  (a single JSON-Schema source of truth in `docs/`, validated on both sides) and the T1.2
-  round-trip test; a codegen step (e.g. `json-schema-to-typescript` for the TS type) is a
-  clean later addition if drift bites.
+    — damit der typisierte Frontend-Service (T2.1) genau eine Sache hat, gegen die
+    er codet.
+  - **Warning-Envelope (Erfolgspfad — 3rd-review minor #1):** ein `200` mit einer
+    weichen Warnung nutzt **eine** Form — `{ "data": <payload>, "warning": { "code":
+    "<slug>", "message": "<text>" } }` — für alle drei Degradations-Flows
+    (`/api/foods/search` nur-Cache; der Parse-LLM-invalid-Draft, T3.2; der
+    LLM-Makro-Fallback, T4.3). Fehlt `warning`, ist das Ergebnis sauber.
+  - **Status-Codes:** `400` fehlerhafter Request; `422` schema-invalider
+    `Recipe`-/Makro-Body (Fehler unseres eigenen Validators, M0 `jsonschema` — mit
+    den fehlerhaften Pfaden in `details`); `404` unbekannte `:id`; `504`
+    Upstream-Timeout. **OFF-Throttling-Verhalten für `/api/foods/search` (3rd-review
+    minor #2):** existiert ein lokaler Kandidat → `200` + Cache-Ergebnisse +
+    `warning`; sonst den Upstream-Zustand durchreichen — OFF gab `429` → `429`; OFF
+    nicht erreichbar → `502`; OFF-Timeout → `504`. LLM nicht erreichbar / Timeout auf
+    `/api/parse` und `/api/macros/estimate` ist KEIN 5xx: es degradiert auf den
+    `200` + Warnung-Draft-Pfad (der Best-Effort-/leere editierbare Draft aus
+    T3.2/T4.3), sodass ein ausgefallenes LLM die Eingabe nie blockiert (konsistent
+    mit D6) — der T3.2/T4.3-„invalid output"-Fallback und ein Transport-Fehler
+    teilen sich diesen Pfad. Mutationen nutzen den Error-Envelope: `PUT`/`DELETE`
+    zielen auf `/api/recipes/:id` (damit die `404`-auf-`:id`-Regel gilt), und ein
+    erfolgreiches `DELETE` gibt `204` zurück.
+  - **Liste vs. Detail + Pagination:** `GET /api/recipes` liefert eine
+    leichtgewichtige Summary-Projektion (id, title, erstes Bild, `favorite`, Makros
+    pro Portion + `macrosEstimated`, damit die Liste geschätzte Makros ebenfalls
+    markieren kann, tags) — NICHT die voll aus Kind-Tabellen zusammengesetzten
+    Objekte — und ist paginiert über `?limit=&offset=`; `limit` ist standardmäßig 50
+    und wird auf ein hartes serverseitiges Maximum (z. B. 100) geklammert, sodass ein
+    großes Client-`limit` die Grenze nicht aushebeln kann (3rd-review minor #5). Das
+    volle kanonische `Recipe` (alle Kind-Tabellen zusammengesetzt) gibt es nur unter
+    `GET /api/recipes/:id`. Das begrenzt die Browse-Query, wenn der Bestand wächst.
+- **Akzeptierter Trade-off:** zwei Build-Systeme und zwei Deploys; der
+  `Recipe`-Typ wird über C++/TS NICHT automatisch geteilt — drei Repräsentationen
+  (JSON-Schema, C++-Struct, TS-Typ) werden in dieser Phase von Hand synchron
+  gehalten, ein bekanntes Drift-Risiko (Q9). Gemildert durch D2 (ein JSON-Schema als
+  Single Source of Truth in `docs/`, auf beiden Seiten validiert) und den
+  T1.2-Round-Trip-Test; ein Codegen-Schritt (z. B. `json-schema-to-typescript` für
+  den TS-Typ) ist eine saubere spätere Ergänzung, falls der Drift wehtut.
 
-### D2 — Storage: PostgreSQL (own libpq wrapper), with JSON as the interchange format
-- **PostgreSQL** via our **own DB layer over libpq** (D1). Chosen over SQLite because the
-  human intends to add **auth / multi-user later**, where Postgres is the sturdier base; the
-  extra container is cheap under Docker Compose. The DB layer exposes a small **synchronous**
-  API — connect (from our own connection pool), **parameterized `exec`** (`$1,$2…` binds,
-  never string-concatenated SQL → no injection), and result→struct mapping — kept synchronous
-  to stay approachable while learning.
-- **Threading (own thread pool) — built LAST in M0 (T0.9):** the server runs
-  **single-threaded through T0.8** (accept → handle → respond, one connection at a time), which
-  is enough for a single user and keeps the whole M0 slice working before concurrency is
-  introduced. **T0.9 then adds the thread pool:** the HTTP server (D1) dispatches each request
-  to a **worker thread** from our pool; a worker owns a libpq connection for the request and the
-  blocking `exec`/HTTPS calls happen on that worker, never on the accept loop. For a
-  **single user** a small pool (e.g. 4–8 workers) is ample; we do **not** claim non-blocking
-  I/O — blocking a worker is fine at this scale. (This is where building it ourselves teaches
-  the concurrency model a framework would have hidden — which is exactly why it is done last,
-  once sockets/parsing/routing/DB already work, not entangled with learning the basics.)
-- **Dependencies via system packages (no vcpkg):** the only externals are **libpq**,
-  **OpenSSL**, **utf8proc**, and **Catch2**, installed with **`apt`** (`libpq-dev`,
-  `libssl-dev`, `libutf8proc-dev`, `catch2`/`libcatch2-dev`) in dev (WSL) and in the Docker
-  build stage. The **Makefile** locates them
-  with `pkg-config`. No framework, no dependency manager. (Reproducibility
-  rests on pinned distro/base-image versions per D1; the build compiles **none** of these
-  from source, so it is fast and light — Q8.)
-- **JSON + schema validation are OURS (D1):** own parser/serializer, and own validation of
-  the `Recipe`/`Macros` schema. The schema in `docs/` stays the single source of truth, but
-  since we validate it ourselves we are **not bound to a library's supported draft** — we
-  author it to a clear, self-consistent subset: object/array/string/number/enum/required, and
-  **nullability expressed as a `"type":[…,"null"]` union — NOT a `nullable` keyword** (that's
-  OpenAPI, not JSON-Schema; an unknown keyword would silently under-validate the many nullable
-  fields — 5th-review T3) + `definitions/Macros` via `$ref`. Our validator implements exactly
-  that subset. This backs every "schema-validated" step (T2.x, T3.2, T4.3). (Supersedes the old
-  valijson/Draft-7 constraint.)
-- **Migrations:** plain **SQL files** in `/backend/migrations`, applied by a small
-  **version-tracking runner** on startup that records applied versions in a
-  `schema_migrations` table. Each migration runs **inside its own transaction** and its
-  version is recorded **only on success** (a failure rolls back just that migration, not the
-  ones already committed). **Concurrent-boot safety (Q7 + 2nd-review Major 3 — kept for future
-  scaling, not needed by the single-container deploy):** two backend instances booting at once
-  is impossible in the D6 single-container compose today; this machinery is deliberately kept
-  so a future multi-instance deploy is safe, not silent gold-plating (4th-review meta). The runner
-  must hold its lock and do all its work on **one dedicated libpq connection** (not one drawn
-  from our request pool) — a `pg_advisory_lock` taken from a *pooled* connection could land
-  the lock, the migrations, and the unlock on **different** connections and so fail to
-  serialize. Concretely: acquire a **session-level `pg_advisory_lock` on that one dedicated
-  connection, held across all the per-migration transactions**, then release it at the end.
-  (A single wrapping transaction is *not* used — that would give all-or-nothing rollback
-  across every migration, a different granularity; and a per-migration `pg_advisory_xact_lock`
-  is avoided because it releases at each migration's commit, reopening the race between
-  migrations.) The **"already applied?" check reads `schema_migrations` while the lock is
-  held**, so two booting instances serialize. ("Idempotent" = safe to re-run the runner via
-  version-tracking; the DDL itself is not required to be idempotent.) No ORM code-gen magic.
-- **Relational storage shape (B1 — decided, not JSONB blobs):**
-  - `recipes` — one row per recipe: scalar fields (`title`, `description`, `source_url`,
-    `servings`, `prep_time_min`, `cook_time_min`, `total_weight_g`, `favorite`, `notes`,
-    `schema_version`, `owner_id`, `created_at`, `updated_at`) + the **per-serving macro
-    columns** (`cal`, `protein`, `carbs`, `fat`) + `macro_source` + **`macros_estimated`
-    boolean** (persists the `macrosEstimated` flag so the "estimated" marker survives a
-    save→reload — it is a **stored** field, not derived like per-100 g).
-  - `recipe_ingredients` — **child table**, FK `recipe_id`, an explicit **`position`**
-    integer for ordering, and columns `group_label` (nullable section label — the column is
-    named `group_label`, **not** `group`, which is a Postgres reserved word; the JSON field
-    stays `group`), `name`, `quantity` (nullable), `unit` (nullable), `food_id` (nullable
-    UUID; **the FK → `foods.id` is added later in T4.1** when the `foods` table exists — the
-    column is created here in M1 **without** the constraint), `note` (nullable). This is
-    where the nullable-quantity/to-taste rows and grouping live.
-  - `recipe_steps` — **child table**, FK `recipe_id`, `position`, `text`. (Ordered; may
-    be empty for video-only captions.)
-  - `recipe_images` — **child table**, FK `recipe_id`, `position`, `url`.
-  - `recipe_tags` — **join table**, FK `recipe_id`, `tag`, plus a **`position`** so the
-    `tags[]` array order round-trips (unique on `(recipe_id, tag)`). The T5.2 **tag
-    AND-filter** is `... WHERE tag = ANY($tags) GROUP BY recipe_id HAVING count(*) = $n`.
-  - **All child/join tables** carry `FK recipe_id … ON DELETE CASCADE`, so
-    `DELETE /api/recipes/:id` (T2.2) removes the whole aggregate cleanly.
-  - Rationale: ordered/queried collections are real rows (clean ordering, the tag-filter
-    and macro-range SQL in T5.2, and future FTS all work), not opaque JSONB. The canonical
-    `Recipe` **JSON** is assembled from these tables at the API boundary (D2's interchange
-    layer); JSON is the wire format, these tables are the persistence.
-- **Auth-ready schema (no auth implemented this phase):** a `users` table stub and a
-  **nullable `owner_id`** FK on `recipes`. Nothing enforces it yet; it exists so auth
-  is a later addition, not a schema migration of live data.
-- A **`foods` table** (created in T4.1, M4) caches Open Food Facts entries the user has
-  picked. It has a **surrogate UUID `id` primary key** (this is what `foodId: uuid?` in the
-  `Recipe` format refers to) with the OFF **barcode `code`** as a **`UNIQUE` column** (not
-  the PK), storing name, per-100 g macros (kcal/protein/carbs/fat), `lang`, and
-  `fetched_at`, so repeat lookups need no network (D5). `recipe_ingredients.food_id`
-  references **`foods.id`**; cache-hit resolution can look up by either `id` or the unique
-  `code`.
-- **Standardised recipe format (`Recipe`)** is defined once as a **JSON Schema in
-  `docs/`** (the single source of truth), mirrored by a C++ struct (our own JSON
-  (de)serialization) and a TS type. It is validated (by our own validator) at every API
-  boundary, on paste-parser output, on LLM output, and used for export. So "everything becomes standardised
-  JSON" holds at the API/interchange layer; Postgres is the persistence detail. The format
-  carries a **`schemaVersion`** — under relational storage this **earns its keep mainly at
-  the export/interchange layer** (a stored-format change is a SQL migration regardless), so
-  it is kept but not oversold (Q6). (A YAML import/export convenience could be layered on
-  later; JSON stays canonical.)
+### D2 — Storage: PostgreSQL (eigener libpq-Wrapper), mit JSON als Austauschformat
+- **PostgreSQL** über unsere eigene DB-Schicht auf libpq (D1). Gewählt statt
+  SQLite, weil der Mensch später Auth / Multi-User ergänzen will, wofür Postgres die
+  robustere Basis ist; der zusätzliche Container ist unter Docker Compose günstig.
+  Die DB-Schicht bietet eine kleine synchrone API — Connect (aus unserem eigenen
+  Connection-Pool), parametrisiertes `exec` (`$1,$2…`-Binds, nie string-konkatenierte
+  SQL → keine Injection) und Result→Struct-Mapping — synchron gehalten, damit es beim
+  Lernen zugänglich bleibt.
+- **Threading (eigener thread pool) — zuletzt in M0 gebaut (T0.9):** der Server
+  läuft bis T0.8 single-threaded (accept → handle → respond, eine Verbindung zur
+  Zeit), was für eine Person genügt und die ganze M0-Scheibe zum Laufen bringt, bevor
+  Nebenläufigkeit dazukommt. T0.9 fügt dann den thread pool hinzu: der HTTP-Server
+  (D1) verteilt jeden Request an einen Worker-Thread aus unserem Pool; ein Worker
+  besitzt für den Request eine libpq-Connection, und die blockierenden `exec`-/
+  HTTPS-Aufrufe laufen auf diesem Worker, nie auf dem Accept-Loop. Für eine Person
+  reicht ein kleiner Pool (z. B. 4–8 Worker); wir behaupten KEIN non-blocking I/O —
+  einen Worker zu blockieren ist in dieser Größenordnung in Ordnung. (Genau hier
+  lehrt das Selberbauen das Concurrency-Modell, das ein Framework versteckt hätte —
+  deshalb kommt es zuletzt, wenn Sockets/Parsing/Routing/DB schon laufen, nicht
+  verstrickt mit den Basics.)
+- **Dependencies über System-Pakete (kein vcpkg):** die einzigen Externals sind
+  libpq, OpenSSL, utf8proc und Catch2, installiert mit `apt` (`libpq-dev`,
+  `libssl-dev`, `libutf8proc-dev`, `catch2`/`libcatch2-dev`) in dev (WSL) und in der
+  Docker-Build-Stufe. Das Makefile findet sie mit `pkg-config`. Kein Framework, kein
+  Dependency-Manager. (Reproduzierbarkeit ruht auf gepinnten Distro-/
+  Base-Image-Versionen gemäß D1; der Build kompiliert KEINES davon aus dem Quellcode,
+  also ist er schnell und leicht — Q8.)
+- **JSON + Schema-Validierung sind UNSERE (D1):** eigener Parser/Serializer und
+  eigene Validierung des `Recipe`/`Macros`-Schemas. Das Schema in `docs/` bleibt die
+  Single Source of Truth, aber da wir es selbst validieren, sind wir nicht an den
+  unterstützten Draft einer Library gebunden — wir schreiben es zu einer klaren, in
+  sich konsistenten Teilmenge: object/array/string/number/enum/required, und
+  Nullability ausgedrückt als `"type":[…,"null"]`-Union — NICHT als
+  `nullable`-Keyword (das ist OpenAPI, nicht JSON-Schema; ein unbekanntes Keyword
+  würde die vielen nullable-Felder still unter-validieren — 5th-review T3) +
+  `definitions/Macros` über `$ref`. Unser Validator implementiert genau diese
+  Teilmenge. Das trägt jeden „schema-validated"-Schritt (T2.x, T3.2, T4.3). (Löst die
+  alte valijson-/Draft-7-Beschränkung ab.)
+- **Migrationen:** einfache SQL-Dateien in `/backend/migrations`, beim Start von
+  einem kleinen versions-verfolgenden Runner angewendet, der die angewendeten
+  Versionen in einer `schema_migrations`-Tabelle festhält. Jede Migration läuft in
+  ihrer eigenen Transaktion, und ihre Version wird nur bei Erfolg festgehalten (ein
+  Fehlschlag rollt nur diese Migration zurück, nicht die schon committeten).
+  **Sicherheit bei nebenläufigem Boot (Q7 + 2nd-review Major 3 — für spätere
+  Skalierung behalten, vom Single-Container-Deploy nicht gebraucht):** zwei
+  gleichzeitig bootende Backend-Instanzen sind im heutigen D6-Single-Container-Compose
+  unmöglich; diese Mechanik wird bewusst behalten, damit ein späteres
+  Multi-Instanz-Deploy sicher ist, kein stilles Gold-Plating (4th-review meta). Der
+  Runner muss seinen Lock halten und all seine Arbeit auf einer dedizierten
+  libpq-Connection erledigen (nicht auf einer aus unserem Request-Pool) — ein
+  `pg_advisory_lock` von einer gepoolten Connection könnte den Lock, die Migrationen
+  und den Unlock auf verschiedenen Connections landen lassen und so nicht
+  serialisieren. Konkret: einen session-level `pg_advisory_lock` auf dieser einen
+  dedizierten Connection nehmen, über alle Per-Migration-Transaktionen halten, am Ende
+  freigeben. (Eine einzelne umschließende Transaktion wird NICHT genutzt — die gäbe
+  ein Alles-oder-nichts-Rollback über alle Migrationen, eine andere Granularität; und
+  ein Per-Migration-`pg_advisory_xact_lock` wird vermieden, weil er bei jedem Commit
+  einer Migration freigibt und das Race zwischen den Migrationen wieder öffnet.) Der
+  „schon angewendet?"-Check liest `schema_migrations`, während der Lock gehalten wird,
+  sodass zwei bootende Instanzen serialisieren. („Idempotent" = sicher, den Runner via
+  Versions-Tracking erneut auszuführen; die DDL selbst muss nicht idempotent sein.)
+  Keine ORM-Codegen-Magie.
+- **Relationale Speicherform (B1 — entschieden, keine JSONB-Blobs):**
+  - `recipes` — eine Zeile pro Rezept: Skalar-Felder (`title`, `description`,
+    `source_url`, `servings`, `prep_time_min`, `cook_time_min`, `total_weight_g`,
+    `favorite`, `notes`, `schema_version`, `owner_id`, `created_at`, `updated_at`) +
+    die Makro-Spalten pro Portion (`cal`, `protein`, `carbs`, `fat`) + `macro_source`
+    + `macros_estimated` (boolean; hält das `macrosEstimated`-Flag fest, damit der
+    „estimated"-Marker ein save→reload überlebt — ein gespeichertes Feld, nicht
+    abgeleitet wie per-100 g).
+  - `recipe_ingredients` — Kind-Tabelle, FK `recipe_id`, ein expliziter
+    `position`-Integer für die Reihenfolge, und Spalten `group_label` (nullable
+    Section-Label — die Spalte heißt `group_label`, NICHT `group`, ein
+    Postgres-reserviertes Wort; das JSON-Feld bleibt `group`), `name`, `quantity`
+    (nullable), `unit` (nullable), `food_id` (nullable UUID; der FK → `foods.id` wird
+    später in T4.1 ergänzt, wenn die `foods`-Tabelle existiert — die Spalte entsteht
+    hier in M1 OHNE das Constraint), `note` (nullable). Hier leben die
+    nullable-quantity-/to-taste-Zeilen und die Gruppierung.
+  - `recipe_steps` — Kind-Tabelle, FK `recipe_id`, `position`, `text`. (Geordnet;
+    kann für video-only-Captions leer sein.)
+  - `recipe_images` — Kind-Tabelle, FK `recipe_id`, `position`, `url`.
+  - `recipe_tags` — Join-Tabelle, FK `recipe_id`, `tag`, plus ein `position`, damit
+    die Reihenfolge des `tags[]`-Arrays round-trippt (unique auf `(recipe_id, tag)`).
+    Der T5.2-Tag-AND-Filter ist `... WHERE tag = ANY($tags) GROUP BY recipe_id HAVING
+    count(*) = $n`.
+  - Alle Kind-/Join-Tabellen tragen `FK recipe_id … ON DELETE CASCADE`, sodass
+    `DELETE /api/recipes/:id` (T2.2) das ganze Aggregat sauber entfernt.
+  - Begründung: geordnete/abgefragte Collections sind echte Zeilen (saubere
+    Reihenfolge, der Tag-Filter und die Makro-Range-SQL in T5.2, und späteres FTS
+    funktionieren alle), kein opakes JSONB. Das kanonische `Recipe`-JSON wird an der
+    API-Grenze aus diesen Tabellen zusammengesetzt (D2s Austausch-Schicht); JSON ist
+    das Wire-Format, diese Tabellen sind die Persistenz.
+- **Auth-ready Schema (keine Auth in dieser Phase implementiert):** ein
+  `users`-Tabellen-Stub und ein nullable `owner_id`-FK auf `recipes`. Noch erzwingt es
+  nichts; es existiert, damit Auth eine spätere Ergänzung ist, keine Schema-Migration
+  von Live-Daten.
+- Eine `foods`-Tabelle (in T4.1, M4 erstellt) cacht die
+  Open-Food-Facts-Einträge, die der Nutzer gewählt hat. Sie hat einen
+  Surrogat-UUID-`id`-Primary-Key (auf den sich `foodId: uuid?` im `Recipe`-Format
+  bezieht) mit dem OFF-Barcode `code` als `UNIQUE`-Spalte (nicht als PK) und speichert
+  Name, Makros pro 100 g (kcal/protein/carbs/fat), `lang` und `fetched_at`, sodass
+  wiederholte Lookups kein Netz brauchen (D5). `recipe_ingredients.food_id`
+  referenziert `foods.id`; eine Cache-Hit-Auflösung kann über `id` oder den unique
+  `code` nachschlagen.
+- Das einheitliche Rezeptformat (`Recipe`) ist einmal als JSON-Schema in `docs/`
+  definiert (die Single Source of Truth), gespiegelt von einem C++-Struct (unsere
+  eigene JSON-(De)Serialisierung) und einem TS-Typ. Es wird (von unserem eigenen
+  Validator) an jeder API-Grenze validiert, auf der Ausgabe des Paste-Parsers, auf der
+  LLM-Ausgabe, und für den Export genutzt. So gilt „alles wird einheitliches JSON" auf
+  der API-/Austausch-Schicht; Postgres ist das Persistenz-Detail. Das Format trägt eine
+  `schemaVersion` — unter relationaler Speicherung verdient sie sich ihren Platz vor
+  allem auf der Export-/Austausch-Schicht (eine Änderung der Speicherform ist ohnehin
+  eine SQL-Migration), also wird sie behalten, aber nicht überverkauft (Q6). (Eine
+  YAML-Import-/Export-Bequemlichkeit ließe sich später ergänzen; JSON bleibt
+  kanonisch.)
 
-### D3 — Local-LLM integration (pluggable, behind an HTTP-client seam)
-- **HTTP-client seam (B2 — testability):** outbound HTTP goes through a tiny
-  **`IHttpClient` interface** (`get`/`post` → status + body), with **our own client
-  implementation** (sockets + **OpenSSL** for HTTPS — D1) for production and a
-  **fake/stub implementation** for tests. This is the seam the mocked-HTTP verifications in
-  T3.2, T4.1, and T4.3 depend on — the real client is never hit in tests. Blocking behaviour
-  runs on a worker thread (D2).
-- `LlmClient` (built on the `IHttpClient` seam) calls a local LLM. Config via env:
-  `LLM_BASE_URL` (server root, default `http://localhost:11434`), `LLM_MODEL` (**no baked
-  default — documentation-only; if unset, the LLM engine is unavailable and the toggle is
-  disabled, never a silent guess**), optional `LLM_API_KEY`.
-- **Endpoint + structured output (built T3.2/M3, reused T4.3/M4):** default to **Ollama's native `/api/chat` with the
-  `format` parameter set to the `Recipe`/macro JSON Schema** — reports indicate the native
-  `format` (schema-enforced) is **more reliable** than the OpenAI-compatible
-  `/v1/chat/completions` + `response_format: json_schema` path, which several models
-  **ignore**. The OpenAI-compatible surface is kept as a **configurable fallback** for
-  non-Ollama servers. Either way, **every response is validated with our own validator (M0
-  `jsonschema`)** against the schema, with the documented graceful fallback (an empty/partial
-  draft into the editable preview + a warning — see D4/T3.2) on invalid output. Not
-  prompt-only coercion.
-- LLM is **off unless the engine toggle selects it**, so the app is fully usable with
-  no LLM running.
-- **No translation:** the LLM only parses captions into schema JSON, **preserving the
-  original language** (German stays German). OFF search already handles German terms, so
-  German↔English translation is explicitly out of scope this phase.
-- **Model is not hard-coded** — chosen at runtime by `LLM_MODEL`; switching models is an
-  env change + restart (the model must be pulled in Ollama), no code change or rebuild.
-  Documented **reference default: `qwen3.5-9b`** (fast; best-in-family German, and the
-  fallback engine so speed matters). Higher-quality option: **`qwen3.8-27b`** for messy
-  captions. **These tags are illustrative** (they mirror the user's local launcher labels,
-  not confirmed Ollama registry ids) — **T6.2 must verify the exact `ollama pull` tag** so
-  the `.env.example` default actually resolves. If strict JSON adherence ever becomes the bottleneck despite structured
-  output, **Gemma 4 27B (Q4_K_M)** is a noted alternative. (Rationale: 2026 benchmarks
-  put Qwen3 as the leader for non-English/German, while JSON reliability here comes from
-  the server's structured-output mode + our own schema validation + fallback, not model
-  obedience.)
+### D3 — Lokale-LLM-Integration (steckbar, hinter einem HTTP-Client-Seam)
+- **HTTP-Client-Seam (B2 — Testbarkeit):** ausgehendes HTTP läuft durch ein
+  winziges `IHttpClient`-Interface (`get`/`post` → Status + Body), mit unserer eigenen
+  Client-Implementierung (Sockets + OpenSSL für HTTPS — D1) für die Produktion und
+  einer Fake-/Stub-Implementierung für Tests. Das ist der Seam, von dem die gemockten
+  HTTP-Verifikationen in T3.2, T4.1 und T4.3 abhängen — der echte Client wird in Tests
+  nie getroffen. Blockierendes Verhalten läuft auf einem Worker-Thread (D2).
+- `LlmClient` (auf dem `IHttpClient`-Seam) ruft ein lokales LLM. Konfiguration über
+  env: `LLM_BASE_URL` (Server-Root, Default `http://localhost:11434`), `LLM_MODEL`
+  (kein eingebackener Default — nur Dokumentation; wenn ungesetzt, ist die LLM-Engine
+  nicht verfügbar und der Toggle deaktiviert, nie ein stiller Rateversuch), optional
+  `LLM_API_KEY`.
+- **Endpoint + strukturierte Ausgabe (gebaut in T3.2/M3, wiederverwendet in
+  T4.3/M4):** standardmäßig Ollamas natives `/api/chat` mit dem `format`-Parameter auf
+  das `Recipe`-/Makro-JSON-Schema gesetzt — Berichten zufolge ist das native `format`
+  (schema-erzwungen) zuverlässiger als der OpenAI-kompatible
+  `/v1/chat/completions`-+-`response_format: json_schema`-Pfad, den mehrere Modelle
+  ignorieren. Die OpenAI-kompatible Oberfläche bleibt als konfigurierbarer Fallback für
+  Nicht-Ollama-Server. So oder so wird jede Antwort mit unserem eigenen Validator (M0
+  `jsonschema`) gegen das Schema validiert, mit dem dokumentierten sanften Fallback (ein
+  leerer/partieller Draft in die editierbare Preview + eine Warnung — siehe D4/T3.2) bei
+  invalider Ausgabe. Keine reine Prompt-Nötigung.
+- Das LLM ist aus, solange der Engine-Toggle es nicht wählt, sodass die App voll
+  nutzbar ist, ohne dass ein LLM läuft.
+- **Keine Übersetzung:** das LLM parst Captions nur in Schema-JSON und bewahrt die
+  Originalsprache (Deutsch bleibt Deutsch). Die OFF-Suche kommt mit deutschen Begriffen
+  bereits klar, also ist Deutsch↔Englisch-Übersetzung in dieser Phase ausdrücklich
+  außerhalb des Scopes.
+- **Das Modell ist nicht hart codiert** — zur Laufzeit über `LLM_MODEL` gewählt; ein
+  Modellwechsel ist eine env-Änderung + Neustart (das Modell muss in Ollama gepullt
+  sein), keine Code-Änderung, kein Rebuild. Dokumentierter Referenz-Default:
+  `qwen3.5-9b` (schnell; bestes Deutsch der Familie, und die Fallback-Engine, also zählt
+  Tempo). Höhere Qualität: `qwen3.8-27b` für unordentliche Captions. Diese Tags sind
+  illustrativ (sie spiegeln die lokalen Launcher-Labels des Nutzers, keine bestätigten
+  Ollama-Registry-IDs) — T6.2 muss den exakten `ollama pull`-Tag verifizieren, damit der
+  `.env.example`-Default tatsächlich auflöst. Falls strikte JSON-Treue trotz
+  strukturierter Ausgabe je zum Flaschenhals wird, ist Gemma 4 27B (Q4_K_M) eine
+  notierte Alternative. (Begründung: 2026er-Benchmarks sehen Qwen3 als führend für
+  Nicht-Englisch/Deutsch, während JSON-Zuverlässigkeit hier aus dem
+  Structured-Output-Modus des Servers + unserer eigenen Schema-Validierung + dem Fallback
+  kommt, nicht aus Modell-Gehorsam.)
 
-### D4 — Paste parsing: two engines behind one interface
-- **Scope this phase: social captions only** — TikTok / Instagram free-text captions
-  (the three fixtures). **Out of scope:** pasted recipe-website text and URL/HTML
-  fetching (schema.org/`Recipe` JSON-LD). Those are a clean later addition behind the
-  same `RecipeParser` interface and are **not** built now.
-- `RecipeParser` interface with two C++ implementations:
-  - `RuleBasedParser` — **the best-effort primary engine**: the everyday workhorse that
-    fully handles the pinned caption patterns (sections→`group`, quantity/unit regex,
-    macro block, to-taste rows, parenthetical→note, hashtag/emoji stripping). Offline,
-    free, deterministic; the app is fully usable with no LLM running.
-    - **UTF-8 is a first-class concern (B3), handled by our own scanning — no regex engine.**
-      Captions are full of multi-byte content — emoji (🍗💪🛒), umlauts/ß (`Eiweiß`,
-      `Hähnchen`, `Kohlenhydrate`), `%`/`€`. Consistent with the from-scratch decision (D1)
-      and the minimal externals (no `re2`), the parser does its **own UTF-8-aware scanning**:
-      decode to Unicode codepoints, **strip emoji/symbols by codepoint ranges** (not byte
-      hacks), tokenize on whitespace/punctuation, and match units/labels/quantities as tokens
-      — **anchoring quantity matches at line/token start** so `140ml Kochsahne 7%` does not
-      read the `7` as a quantity. German unit words (`TL`/`EL`/`Stück`/`Prise`)
-      and macro labels (`Eiweiß`/`Kohlenhydrate`/`Fett`) are matched as whole tokens.
-  - `LlmParser` — **the fallback** for messy captions the rules miss: sends pasted text
-    + the `Recipe` JSON Schema to the local LLM, asks for schema-valid JSON, validates it.
-    "Fallback" here means **user-selected** (the human toggles to the LLM engine when the
-    rules do poorly) — there is **no automatic rule→LLM handoff**. When the LLM returns
-    invalid/unparseable JSON, the documented behaviour is to surface a **best-effort or
-    empty draft into the editable preview with a warning** (never a silent save, never an
-    auto-retry with the other engine); the human then corrects it in the preview.
-- **UI:** on the paste screen the user picks the engine, sees the parsed result in an
-  **editable preview form** (reuses the M2 form), corrects anything, then saves.
-  Parsing never saves directly — the human always confirms.
+### D4 — Paste-Parsing: zwei Engines hinter einem Interface
+- **Scope dieser Phase: nur Social-Captions** — TikTok-/Instagram-Freitext-Captions
+  (die drei Fixtures). **Außerhalb des Scopes:** eingefügter Rezept-Website-Text und
+  URL-/HTML-Fetching (schema.org/`Recipe` JSON-LD). Das ist eine saubere spätere
+  Ergänzung hinter demselben `RecipeParser`-Interface und wird jetzt NICHT gebaut.
+- `RecipeParser`-Interface mit zwei C++-Implementierungen:
+  - `RuleBasedParser` — **die Best-Effort-Primär-Engine**: das Alltags-Arbeitstier,
+    das die festgelegten Caption-Muster voll abdeckt (Sections→`group`,
+    Menge/Einheit-Regex, Makro-Block, to-taste-Zeilen, Klammerausdruck→Notiz, Hashtag-/
+    Emoji-Stripping). Offline, kostenlos, deterministisch; die App ist voll nutzbar, ohne
+    dass ein LLM läuft.
+    - **UTF-8 ist ein First-Class-Anliegen (B3), erledigt durch eigenes Scanning —
+      keine Regex-Engine.** Captions stecken voller Multibyte-Inhalt — Emoji (🍗💪🛒),
+      Umlaute/ß (`Eiweiß`, `Hähnchen`, `Kohlenhydrate`), `%`/`€`. Konsistent mit der
+      From-scratch-Entscheidung (D1) und den minimalen Externals (kein `re2`) macht der
+      Parser sein eigenes UTF-8-bewusstes Scanning: zu Unicode-Codepoints dekodieren,
+      Emoji/Symbole über Codepoint-Bereiche strippen (keine Byte-Hacks), an Whitespace/
+      Interpunktion tokenisieren und Einheiten/Labels/Mengen als Tokens matchen —
+      Mengen-Matches am Zeilen-/Token-Anfang verankert, damit `140ml Kochsahne 7%` die `7`
+      nicht als Menge liest. Deutsche Einheitenwörter (`TL`/`EL`/`Stück`/`Prise`) und
+      Makro-Labels (`Eiweiß`/`Kohlenhydrate`/`Fett`) werden als ganze Tokens gematcht.
+  - `LlmParser` — **der Fallback** für unordentliche Captions, die die Regeln
+    verfehlen: schickt den eingefügten Text + das `Recipe`-JSON-Schema ans lokale LLM,
+    bittet um schema-valides JSON, validiert es. „Fallback" heißt hier nutzer-gewählt (der
+    Mensch schaltet auf die LLM-Engine, wenn die Regeln schwach abschneiden) — es gibt
+    KEINE automatische Regel→LLM-Übergabe. Wenn das LLM invalides/unparsbares JSON liefert,
+    ist das dokumentierte Verhalten, einen Best-Effort- oder leeren Draft mit einer Warnung
+    in die editierbare Preview zu bringen (nie ein stilles Speichern, nie ein Auto-Retry mit
+    der anderen Engine); der Mensch korrigiert ihn dann in der Preview.
+- **UI:** auf dem Paste-Screen wählt der Nutzer die Engine, sieht das geparste Ergebnis
+  in einem editierbaren Preview-Formular (nutzt das M2-Formular wieder), korrigiert alles
+  Nötige und speichert dann. Parsen speichert nie direkt — der Mensch bestätigt immer.
 
-### D5 — Macros: from-ingredients (search & pick), LLM-estimate, or manual (always overridable)
-- **Nutrition source: Open Food Facts (OFF)** behind a `NutritionSource` interface.
-  Chosen over USDA because the user cooks from **German** recipes: OFF is multilingual
-  with strong German-language coverage and a text-search API, whereas USDA is
-  English-only/US-centric (its *numbers* are universal but its *names* won't match German
-  ingredients, and German-specific foods like Quark/Schmand are absent). The interface
-  leaves a seam to add USDA (clean generic whole-food values) as a secondary source later.
-  OFF is **ODbL**-licensed — fine for personal self-hosted use; a small "Data from Open
-  Food Facts (ODbL)" attribution line is shown in the UI.
-- **Known data-quality risk (M4 — relocated, not eliminated):** OFF is a **branded-product**
-  database with sparse, uneven, user-contributed per-100 g data for **generic whole foods**
-  (chicken breast, rump steak, rice, onion) — exactly what these fixtures are made of.
-  Search-and-pick removes the *auto-match* error, but the user still picks among branded
-  entries for a whole food, and quality varies. Mitigations (all already in the flow):
-  the pick UI **prefers products with complete nutriments / a nutrition grade** (T4.2b),
-  **manual override is always available** (a generic whole-food value the user trusts),
-  and the **USDA seam** (clean generic values) is the intended future secondary source for
-  exactly this gap. Documented as a real limitation, not a solved problem.
-- **Search-and-pick per ingredient (human in the loop):** rather than auto-guessing a
-  match (the previous plan's biggest accuracy risk), the user **searches OFF for each
-  ingredient and picks the right food**; `quantity × per-100 g` → macros. This removes
-  the risky fuzzy auto-match.
-- **OFF API contract (M1 + 2nd-review Major 2 — endpoint/service pinned correctly):** these
-  are **distinct** and must not be conflated. **Primary text search = the classic OFF API v2
-  search, `GET https://world.openfoodfacts.org/api/v2/search`** (documented, stable).
-  **Search-a-licious** is the *newer, separate* search service on its **own host**
-  (`https://search.openfoodfacts.org`, its own `/search` endpoint) meant to eventually
-  replace v2 — a valid future swap behind the `NutritionSource` interface, **not** the same
-  thing as `/api/v2/search`. The legacy `/cgi/search.pl` is deprecated ("not recommended for
-  new integrations") — last-resort fallback only. Product reads by barcode.
-  OFF **mandates a descriptive `User-Agent`** (e.g. `mise-en-place/0.1 (contact)`) — a
-  generic/empty UA is throttled/blocked, so our HTTP client always sets it — and OFF enforces
-  **rate limits** returning 429.
-  **Do not hard-code the old "~100/min product" figure — it is wrong/too high** (current
-  reported product limit is materially lower, ~15/min; search ~10/min). **T4.1 must confirm
-  the exact current limits against the live OFF docs** and size the backoff conservatively
-  (a too-generous budget invites an IP ban). The client sets the UA and handles 429 with
-  exponential backoff.
-- **Per-100 g nutrient mapping (pinned — avoids the kJ/kcal trap):** read
-  `energy-kcal_100g` for calories (fall back to `energy_100g ÷ 4.184`, since `energy_100g`
-  is kJ), and `proteins_100g` / `carbohydrates_100g` / `fat_100g`. **Products missing the
-  `*_100g` nutriments are not pickable** and are flagged — never zero-filled. (~half of
-  OFF products lack complete nutrition data.)
-- **Cache: search local first, OFF only when insufficient.** Search matches the local
-  **`foods` table** first and calls OFF only when local candidates are thin; every
-  **picked** food is persisted (keyed by OFF **barcode `code`**, unique, with `lang` +
-  `fetched_at`) so **resolving an already-picked food needs no network**. Over time this
-  builds the user's own vetted local subset — fast, offline-reusable, absorbing OFF's
-  uneven quality (each entry vetted once on pick).
-- **Unit→gram conversion:** OFF gives per-100 g, so quantities must resolve to grams.
-  Mass units (g/kg) are exact. **Volume units (ml/l/cup/tbsp/tsp) are density-dependent**
-  — OFF's `serving_size` is free text and rarely yields a usable density, so the converter
-  uses a **small built-in density table for common liquids** (water, milk, oil…), falls
-  back to water-equivalent (1 g/ml) only as a last resort, and **flags** volume ingredients
-  with no density (flagged, not silently zeroed). Macros stay always-overridable.
-- **Piece/spoon resolution (M2 — so per-100 g isn't dark for real recipes):** the fixtures
-  are dominated by piece and spoon units (`2 Knoblauchzehen`, `1 rote Zwiebel`, `1 TL`,
-  `2 tbsp`) that the strict rule below would leave unresolved — making per-100 g "—" for
-  virtually every real recipe. To fix that, the converter also carries a **small
-  piece-weight table** (e.g. 1 clove ≈ 5 g, 1 onion ≈ 150 g, 1 egg ≈ 60 g, 1 bell pepper
-  ≈ 150 g) and **fixed spoon volumes** (TL/tsp ≈ 5 ml, EL/tbsp ≈ 15 ml → grams via the
-  density table). It may use OFF **`serving_size`** *only* when it clearly parses as a
-  single-piece weight; it must **not** use OFF **`product_quantity`** — that is the
-  **package** quantity (e.g. 500 g for a bag of rice), **not** a per-piece weight (2nd-review
-  Major 2). These are **approximate defaults, clearly overridable**. Units with no table
-  entry and no density remain **flagged** (not silently zeroed).
-- **Honesty of approximate macros (2nd-review Major 1 — introduced by the M2 fix):** the
-  piece/spoon table feeds **both** the weight denominator **and** each ingredient's grams, so
-  when it contributes, the shown per-serving macros *and* per-100 g are **approximate**. To
-  avoid presenting guessed numbers as exact, the recipe carries **`macrosEstimated: true`**
-  whenever any piece/spoon-table (or serving_size-derived) weight fed the math, and the **UI
-  marks those macros "estimated"**. This restores the honesty the strict "—" used to give,
-  without going dark for real recipes. **The same flag is set on the LLM-estimate path (T4.3
-  + 3rd-review Major):** LLM-estimated macros and total weight are approximate by nature, so
-  `macrosEstimated: true` and the UI marks them estimated after save/reload, not only during
-  entry — plus a `macroSource` badge (ingredients/llm/manual) so provenance survives reload
-  regardless.
-- **LLM-estimate button:** asks the local LLM for per-portion macros (and an estimated
-  total weight) when the DB lookup is incomplete or the user prefers it.
-- **Manual:** the user can always type/override macros.
-- The app stores **per-portion macros + portion count + total recipe weight (g)**.
-  **Per-100 g is a derived value** — `perServing × servings ÷ totalWeightG × 100`, not
-  independently persisted — locked in T1.2 so it can't drift. `totalWeightG` is
-  auto-populated **only when *every* ingredient is picked *and* every unit resolves to
-  grams**; if any ingredient is unpicked or has an unresolvable (flagged) unit, total
-  weight is partial, so per-100 g shows **"—"** (same path as manual/LLM entries with no
-  weight) rather than a silently wrong value. With the M2 piece/spoon resolution above,
-  common recipes now *do* reach a full weight; the "—" is the honest last-resort, not the
-  normal case. Macro fields: calories, protein, carbs, fat (extensible).
-- **Raw vs cooked weight (Q10 — documented caveat):** `totalWeightG` is the **sum of raw
-  ingredient weights**, not the finished-dish weight (water evaporates in cooking), so the
-  derived per-100 g is *per 100 g of raw input* and slightly understates the cooked dish.
-  Acceptable for this phase; surfaced in the UI/docs so the number isn't mistaken for
-  cooked-weight nutrition. The user can override `totalWeightG` with a measured cooked
-  weight if they want cooked-basis per-100 g.
+### D5 — Makros: aus Zutaten (Suche & Auswahl), LLM-Schätzung oder manuell (immer überschreibbar)
+- **Nährwert-Quelle: Open Food Facts (OFF)** hinter einem
+  `NutritionSource`-Interface. Gewählt statt USDA, weil der Nutzer aus deutschen
+  Rezepten kocht: OFF ist mehrsprachig mit starker deutscher Abdeckung und einer
+  Textsuche-API, während USDA nur englisch/US-zentriert ist (seine *Zahlen* sind
+  universell, aber seine *Namen* passen nicht zu deutschen Zutaten, und deutschtypische
+  Lebensmittel wie Quark/Schmand fehlen). Das Interface lässt einen Seam, um USDA (saubere
+  generische Vollwert-Werte) später als zweite Quelle zu ergänzen. OFF ist
+  ODbL-lizenziert — für privaten, selbst-gehosteten Gebrauch in Ordnung; eine kleine Zeile
+  „Data from Open Food Facts (ODbL)" wird in der UI gezeigt.
+- **Bekanntes Datenqualitäts-Risiko (M4 — verlagert, nicht beseitigt):** OFF ist eine
+  Marken-Produkt-Datenbank mit spärlichen, ungleichmäßigen, nutzer-beigetragenen
+  Per-100-g-Daten für generische Vollwert-Lebensmittel (Hähnchenbrust, Rumpsteak, Reis,
+  Zwiebel) — genau das, woraus diese Fixtures bestehen. Suche-und-Auswahl beseitigt den
+  *Auto-Match*-Fehler, aber der Nutzer wählt für ein Vollwert-Lebensmittel weiterhin unter
+  Marken-Einträgen, und die Qualität schwankt. Milderungen (alle schon im Flow): die
+  Auswahl-UI bevorzugt Produkte mit vollständigen Nährwerten / einem Nutrition-Grade
+  (T4.2b), manuelles Überschreiben ist immer verfügbar (ein generischer Vollwert-Wert, dem
+  der Nutzer traut), und der USDA-Seam (saubere generische Werte) ist die vorgesehene
+  künftige Zweitquelle für genau diese Lücke. Als echte Limitierung dokumentiert, kein
+  gelöstes Problem.
+- **Suche-und-Auswahl pro Zutat (Mensch im Loop):** statt einen Match automatisch zu
+  raten (das größte Genauigkeits-Risiko des vorigen Plans), sucht der Nutzer OFF für jede
+  Zutat und wählt das richtige Lebensmittel; `quantity × per-100 g` → Makros. Das entfernt
+  den riskanten unscharfen Auto-Match.
+- **OFF-API-Kontrakt (M1 + 2nd-review Major 2 — Endpoint/Service korrekt festgelegt):**
+  diese sind unterschiedlich und dürfen nicht vermengt werden. **Primäre Textsuche = die
+  klassische OFF-API-v2-Suche, `GET https://world.openfoodfacts.org/api/v2/search`**
+  (dokumentiert, stabil). **Search-a-licious** ist der *neuere, separate* Suchdienst auf
+  einem *eigenen Host* (`https://search.openfoodfacts.org`, eigener `/search`-Endpoint),
+  der v2 irgendwann ablösen soll — ein gültiger künftiger Tausch hinter dem
+  `NutritionSource`-Interface, NICHT dasselbe wie `/api/v2/search`. Das alte
+  `/cgi/search.pl` ist deprecated („not recommended for new integrations") — nur
+  Last-Resort-Fallback. Produkt-Lesungen per Barcode. OFF verlangt einen beschreibenden
+  `User-Agent` (z. B. `mise-en-place/0.1 (contact)`) — ein generischer/leerer UA wird
+  gedrosselt/blockiert, also setzt unser HTTP-Client ihn immer — und OFF erzwingt
+  Rate-Limits mit 429. **Die alte „~100/min Produkt"-Zahl NICHT hart codieren — sie ist
+  falsch/zu hoch** (das aktuell berichtete Produkt-Limit ist deutlich niedriger, ~15/min;
+  Suche ~10/min). **T4.1 muss die exakten aktuellen Limits gegen die Live-OFF-Docs
+  bestätigen** und den Backoff konservativ dimensionieren (ein zu großzügiges Budget lädt
+  einen IP-Bann ein). Der Client setzt den UA und behandelt 429 mit exponentiellem Backoff.
+- **Per-100-g-Nährstoff-Mapping (festgelegt — vermeidet die kJ/kcal-Falle):**
+  `energy-kcal_100g` für Kalorien lesen (Fallback `energy_100g ÷ 4.184`, da `energy_100g`
+  in kJ ist), und `proteins_100g` / `carbohydrates_100g` / `fat_100g`. **Produkte ohne die
+  `*_100g`-Nährwerte sind nicht auswählbar** und werden geflaggt — nie mit Null gefüllt.
+  (~die Hälfte der OFF-Produkte hat keine vollständigen Nährwertdaten.)
+- **Cache: erst lokal suchen, OFF nur wenn unzureichend.** Die Suche matcht zuerst die
+  lokale `foods`-Tabelle und ruft OFF nur, wenn die lokalen Kandidaten dünn sind; jedes
+  *gewählte* Lebensmittel wird persistiert (Schlüssel OFF-Barcode `code`, unique, mit
+  `lang` + `fetched_at`), sodass **das Auflösen eines schon gewählten Lebensmittels kein
+  Netz braucht**. Mit der Zeit baut das die eigene geprüfte lokale Teilmenge des Nutzers
+  auf — schnell, offline wiederverwendbar, OFFs ungleichmäßige Qualität absorbierend (jeder
+  Eintrag einmal bei der Auswahl geprüft).
+- **Einheit→Gramm-Umrechnung:** OFF liefert per 100 g, also müssen Mengen in Gramm
+  aufgelöst werden. Massen-Einheiten (g/kg) sind exakt. **Volumen-Einheiten
+  (ml/l/cup/tbsp/tsp) sind dichteabhängig** — OFFs `serving_size` ist Freitext und ergibt
+  selten eine brauchbare Dichte, also nutzt der Converter eine kleine eingebaute
+  Dichte-Tabelle für gängige Flüssigkeiten (Wasser, Milch, Öl…), fällt nur als letztes
+  Mittel auf Wasser-Äquivalent (1 g/ml) zurück und flaggt Volumen-Zutaten ohne Dichte
+  (geflaggt, nicht still genullt). Makros bleiben immer überschreibbar.
+- **Stück/Löffel-Auflösung (M2 — damit per 100 g bei echten Rezepten nicht dunkel
+  bleibt):** die Fixtures sind von Stück- und Löffel-Einheiten dominiert
+  (`2 Knoblauchzehen`, `1 rote Zwiebel`, `1 TL`, `2 tbsp`), die die strikte Regel unten
+  unaufgelöst ließe — was per 100 g für praktisch jedes echte Rezept auf „—" setzt. Um das
+  zu beheben, trägt der Converter zusätzlich eine kleine Stück-Gewichts-Tabelle (z. B. 1
+  Zehe ≈ 5 g, 1 Zwiebel ≈ 150 g, 1 Ei ≈ 60 g, 1 Paprika ≈ 150 g) und feste Löffel-Volumen
+  (TL/tsp ≈ 5 ml, EL/tbsp ≈ 15 ml → Gramm über die Dichte-Tabelle). Er darf OFFs
+  `serving_size` NUR nutzen, wenn es klar als Einzelstück-Gewicht parst; er darf OFFs
+  `product_quantity` NICHT nutzen — das ist die *Packungs*-Menge (z. B. 500 g für einen
+  Beutel Reis), NICHT ein Pro-Stück-Gewicht (2nd-review Major 2). Das sind approximative
+  Defaults, klar überschreibbar. Einheiten ohne Tabellen-Eintrag und ohne Dichte bleiben
+  geflaggt (nicht still genullt).
+- **Ehrlichkeit approximativer Makros (2nd-review Major 1 — durch den M2-Fix
+  eingeführt):** die Stück/Löffel-Tabelle speist SOWOHL den Gewichts-Nenner ALS AUCH die
+  Gramm jeder Zutat, also sind, wenn sie beiträgt, die gezeigten Makros pro Portion *und*
+  per 100 g approximativ. Um geratene Zahlen nicht als exakt zu präsentieren, trägt das
+  Rezept `macrosEstimated: true`, sobald irgendein Stück/Löffel-Tabellen- (oder
+  serving_size-abgeleitetes) Gewicht in die Rechnung floss, und die UI markiert diese Makros
+  als „estimated". Das stellt die Ehrlichkeit wieder her, die das strikte „—" gab, ohne bei
+  echten Rezepten dunkel zu werden. **Dasselbe Flag wird auf dem LLM-Schätzungs-Pfad gesetzt
+  (T4.3 + 3rd-review Major):** LLM-geschätzte Makros und Gesamtgewicht sind ihrer Natur nach
+  approximativ, also `macrosEstimated: true`, und die UI markiert sie nach Speichern/Neuladen
+  als geschätzt, nicht nur während der Eingabe — plus ein `macroSource`-Badge
+  (ingredients/llm/manual), damit die Provenienz das Neuladen ohnehin überlebt.
+- **LLM-Schätzungs-Button:** fragt das lokale LLM nach Makros pro Portion (und einem
+  geschätzten Gesamtgewicht), wenn der DB-Lookup unvollständig ist oder der Nutzer es
+  vorzieht.
+- **Manuell:** der Nutzer kann Makros immer eintippen/überschreiben.
+- Die App speichert **Makros pro Portion + Portionszahl + Gesamt-Rezeptgewicht (g)**.
+  **Per 100 g ist ein abgeleiteter Wert** — `perServing × servings ÷ totalWeightG × 100`,
+  nicht unabhängig persistiert — in T1.2 fixiert, damit er nicht driften kann. `totalWeightG`
+  wird nur automatisch gefüllt, **wenn *jede* Zutat gewählt ist *und* jede Einheit zu Gramm
+  auflöst**; ist eine Zutat ungewählt oder hat eine unauflösbare (geflaggte) Einheit, ist das
+  Gesamtgewicht partiell, also zeigt per 100 g **„—"** (derselbe Pfad wie manuelle/
+  LLM-Einträge ohne Gewicht) statt eines still falschen Werts. Mit der
+  M2-Stück/Löffel-Auflösung oben erreichen gängige Rezepte jetzt *tatsächlich* ein volles
+  Gewicht; das „—" ist das ehrliche letzte Mittel, nicht der Normalfall. Makro-Felder:
+  Kalorien, Protein, Carbs, Fett (erweiterbar).
+- **Roh- vs. gekochtes Gewicht (Q10 — dokumentierter Vorbehalt):** `totalWeightG` ist die
+  **Summe der rohen Zutaten-Gewichte**, nicht das Gewicht des fertigen Gerichts (Wasser
+  verdampft beim Kochen), also ist das abgeleitete per 100 g *pro 100 g Roh-Input* und
+  untertreibt das gekochte Gericht leicht. Für diese Phase akzeptabel; in UI/Docs sichtbar
+  gemacht, damit die Zahl nicht für Nährwerte auf Kochgewicht-Basis gehalten wird. Der Nutzer
+  kann `totalWeightG` mit einem gemessenen Kochgewicht überschreiben, wenn er per 100 g auf
+  Kochgewicht-Basis will.
 
-### D6 — Media, source link, deployment
-- **Images (M6 — concrete limits, not just "validated"):** optional upload(s) via our **own
-  multipart/form-data parser (added into `net` at T5.1)** → disk volume, referenced by URL. The backend
-  **generates its own filename** (UUID + validated extension) and **never trusts the client
-  filename** (no path traversal); it enforces **size ≤ 8 MB** and **content-type ∈ {jpeg,
-  png, webp}** verified by magic bytes, not just the header. The uploads directory is
-  **served by nginx** in prod (a `location /uploads/` block), not by the app.
-- **External image URL (M6b — no SSRF):** the "external image URL" option is **store-only**
-  — the URL is saved and rendered by the browser; the **backend does not fetch it**. This
-  closes the SSRF hole (a server-side fetch could hit the home LAN / Ollama / Postgres).
-- **Source link:** optional URL field, shown as a link on the recipe page (store-only).
-- **Deploy:** Docker Compose — **backend** (multi-stage C++ build → slim runtime),
-  **frontend** (static build served by nginx), **postgres** (with a volume); Ollama is
-  the user's own service referenced by `LLM_BASE_URL`. Runs on a home server / VPS.
-  Needs **outbound network** for first-time Open Food Facts lookups (cached thereafter,
-  subject to OFF's rate limits); optional Ollama for LLM features. **Graceful degradation:**
-  if OFF is unreachable, search returns cached-only results with a clear message, and
-  manual + LLM macro entry still work — a network outage never blocks recipe entry.
-- **Build cost (Q8 — now minimal):** with `apt` system packages, libpq/OpenSSL/Catch2 install
-  as **prebuilt binaries** — they are **not compiled from source** — so the OOM risk that the
-  old Drogon/vcpkg-from-source build carried is essentially gone. Only our own code compiles.
-  (Base-image apt layers cache naturally; document the apt list + min build RAM in T6.2.)
-- **Auth assumption (M6c):** the app is **unauthenticated this phase** (single user).
-  Because it is phone-reachable with full write + upload access, it MUST run behind a
-  **VPN, or a reverse-proxy with basic-auth *over TLS/HTTPS*** — basic-auth without TLS
-  ships credentials in clear over a phone-reachable link, so **HTTPS is part of the
-  caveat, not optional** — until in-app auth lands. Schema is auth-ready (D2).
+### D6 — Medien, Quell-Link, Deployment
+- **Bilder (M6 — konkrete Limits, nicht nur „validiert"):** optionale Uploads über
+  unseren eigenen multipart/form-data-Parser (in `net` bei T5.1 ergänzt) → Disk-Volume,
+  per URL referenziert. Das Backend generiert seinen eigenen Dateinamen (UUID + validierte
+  Extension) und traut dem Client-Dateinamen nie (kein Path-Traversal); es erzwingt Größe
+  ≤ 8 MB und Content-Type ∈ {jpeg, png, webp}, per Magic-Bytes verifiziert, nicht nur per
+  Header. Das Uploads-Verzeichnis wird in prod von nginx ausgeliefert (ein `location
+  /uploads/`-Block), nicht von der App.
+- **Externe Bild-URL (M6b — kein SSRF):** die Option „externe Bild-URL" ist
+  nur-speichern — die URL wird gespeichert und vom Browser gerendert; das Backend holt sie
+  NICHT. Das schließt das SSRF-Loch (ein serverseitiger Fetch könnte das Heim-LAN / Ollama /
+  Postgres treffen).
+- **Quell-Link:** optionales URL-Feld, auf der Rezeptseite als Link gezeigt
+  (nur-speichern).
+- **Deploy:** Docker Compose — Backend (mehrstufiger C++-Build → schlankes Runtime),
+  Frontend (statischer Build, von nginx ausgeliefert), Postgres (mit einem Volume); Ollama
+  ist der eigene Dienst des Nutzers, referenziert über `LLM_BASE_URL`. Läuft auf einem
+  Home-Server / VPS. Braucht ausgehendes Netz für erstmalige Open-Food-Facts-Lookups (danach
+  gecacht, den OFF-Rate-Limits unterworfen); optional Ollama für LLM-Features. **Graceful
+  Degradation:** ist OFF nicht erreichbar, liefert die Suche nur-Cache-Ergebnisse mit einer
+  klaren Meldung, und manuelle + LLM-Makro-Eingabe funktionieren weiter — ein Netzausfall
+  blockiert die Rezept-Eingabe nie.
+- **Build-Kosten (Q8 — jetzt minimal):** mit `apt`-System-Paketen installieren
+  libpq/OpenSSL/Catch2 als vorgebaute Binaries — sie werden NICHT aus dem Quellcode
+  kompiliert — also ist das OOM-Risiko des alten Drogon-/vcpkg-from-source-Builds im
+  Wesentlichen weg. Nur unser eigener Code kompiliert. (Base-Image-apt-Layer cachen von
+  selbst; die apt-Liste + minimalen Build-RAM in T6.2 dokumentieren.)
+- **Auth-Annahme (M6c):** die App ist in dieser Phase unauthentifiziert (eine Person).
+  Weil sie vom Handy aus mit vollem Schreib- + Upload-Zugriff erreichbar ist, MUSS sie hinter
+  einem VPN oder einem Reverse-Proxy mit Basic-Auth *über TLS/HTTPS* laufen — Basic-Auth ohne
+  TLS schickt Credentials im Klartext über eine handy-erreichbare Verbindung, also ist
+  **HTTPS Teil des Vorbehalts, nicht optional** — bis In-App-Auth kommt. Das Schema ist
+  auth-ready (D2).
 
-## Standardised recipe format (`Recipe`) — locked field list
-> **Locked at GATE 0** and validated against real German + English TikTok captions
-> (three worked examples: a video-only caption with pre-computed macros, a grouped
-> multi-section recipe, and an English one with steps + a storage note). The JSON Schema
-> in `docs/` is the single source of truth, formalised at **T1.2**; the C++ struct and TS
-> type mirror it. Because the format carries **`schemaVersion`**, any refinement found
-> while building the paste parser (T3.x) is a **versioned migration, not a redesign** —
-> the field list can evolve deliberately without breaking stored recipes.
+## Einheitliches Rezeptformat (`Recipe`) — festgelegte Feldliste
+> Bei GATE 0 festgelegt und gegen echte deutsche + englische TikTok-Captions
+> validiert (drei durchgearbeitete Beispiele: eine video-only-Caption mit vorberechneten
+> Makros, ein gruppiertes Rezept mit mehreren Sections, und ein englisches mit Steps +
+> einer Aufbewahrungs-Notiz). Das JSON-Schema in `docs/` ist die Single Source of Truth,
+> formalisiert in T1.2; das C++-Struct und der TS-Typ spiegeln es. Weil das Format eine
+> `schemaVersion` trägt, ist jede Verfeinerung, die beim Bau des Paste-Parsers (T3.x)
+> auftaucht, eine versionierte Migration, kein Redesign — die Feldliste kann sich bewusst
+> weiterentwickeln, ohne gespeicherte Rezepte zu brechen.
 
 ```jsonc
 {
@@ -480,408 +543,437 @@ addition, not a migration.
   "createdAt": "iso", "updatedAt": "iso"
 }
 ```
-**Dropped / folded** (revisit later via `schemaVersion` if missed): `cuisine` and
-`category` → fold into `tags`; `difficulty` → skipped (subjective, low payoff);
-`yield` → `servings` (numeric) is authoritative for the macro math; a numeric
-`rating` → replaced by the boolean `favorite`.
+**Verworfen / eingefaltet** (bei Bedarf später via `schemaVersion` wieder aufgreifen):
+`cuisine` und `category` → in `tags` einfalten; `difficulty` → ausgelassen (subjektiv,
+geringer Nutzen); `yield` → `servings` (numerisch) ist maßgeblich für die Makro-Rechnung;
+ein numerisches `rating` → ersetzt durch das boolesche `favorite`.
 
 ---
 
-## Milestone 0 — Core backend libraries (from scratch)
-> New milestone from the 2026-08-24 from-scratch pivot (D1). Builds the plumbing a framework
-> would have given us, so later milestones have libraries to stand on. Everything here is
-> unit-tested in isolation; no recipe logic yet.
-- **T0.1** Toolchain + project skeleton: a plain **GNU Makefile** (pin **C++20** — 5th-review
-  minor, one standard not "C++17/20") finding the **system (apt) packages** `libpq-dev`,
-  `libssl-dev`, `libutf8proc-dev`, `catch2`/`libcatch2-dev` via **`pkg-config`**
-  (`pkg-config --cflags --libs libpq openssl libutf8proc`; no vcpkg, no framework) + the
-  `/backend/lib` (`/net /router /json /jsonschema /db /httpclient`) + `/app` + `/tests` layout
-  (D1) + a Catch2 test target. **Why Make, not CMake:** the build is **Linux-only** (dev in
-  WSL2, deploy on Linux behind a VPN — D6), so CMake's main payoff (cross-platform generation)
-  buys nothing here, while a hand-written Makefile is simpler and keeps the actual compile/link
-  invocations visible — which suits the learn-the-fundamentals goal (D1). If a Windows target
-  is ever added, revisiting CMake is a clean later switch. **An `ASAN+UBSAN` build config
-  (`-fsanitize=address,undefined`) the Catch2 suite runs under (5th-review S2 — the #1 safety
-  net for hand-rolling four untrusted-input parsers), as a Makefile target (e.g. `make asan`),
-  plus TSan coverage for the concurrency work (the T0.9 thread pool and the T0.6 db connection
-  pool).** Also **stand up the dev `docker-compose` Postgres service here** (moved earlier so
-  all of M0 can talk to a DB — 5th-review P3). Dev happens in **WSL2 (Ubuntu)**. *Verify:*
-  `make` builds; a trivial Catch2 test runs green **under ASAN+UBSAN** (`make asan`); the dev
-  Postgres container comes up.
-- **T0.2** `net` — TCP socket listener + **HTTP/1.1 request parser** (request line, headers,
-  body via `Content-Length` **and** chunked) + response writer + keep-alive. **Single-threaded
-  for now** — one connection handled at a time; the **thread pool is deferred to T0.9** (D2),
-  so this task stays focused on correct socket handling and HTTP parsing without concurrency
-  in the mix. Hardening: cap header size / count **and total body size (enforced *during*
-  chunked decode too, where there is no upfront `Content-Length`)**; reject malformed with
-  `400`; a **socket read/idle timeout** (anti-slowloris). **RFC 7230 §3.3.3 framing / anti-
-  smuggling (5th-review T2):** reject **both `Content-Length` and `Transfer-Encoding` present**,
-  reject **duplicate/conflicting `Content-Length`**, accept only `Transfer-Encoding: chunked`
-  (else `400/501`), **overflow-check** chunk-size hex and `Content-Length`, and reject **bare
-  CR / bare LF / embedded NUL** in the request line and headers. **Fuzz the parser (5th-review
-  S2):** a libFuzzer/AFL++ harness on the HTTP parser is part of this task. *Verify:* unit
-  tests parse well-formed and malformed requests (partial, oversized headers, bad
-  `Content-Length`, **CL+TE both present, duplicate CL, oversized chunk-size, bare CR/LF**); an
-  integration test makes a real localhost request; oversized body/headers (incl. a chunked
-  body over the cap) are rejected, not OOM'd; a stalled connection is closed on timeout; **the
-  fuzz harness runs clean for a set budget**.
-- **T0.3** `router` + request/response abstraction: `method + path` (with `:id` params) →
-  handler; unknown path → `404`, wrong method → `405`; the **error envelope + warning
-  envelope** helpers (D1). *Verify:* routing tests incl. `:id` extraction, `404`/`405`, and
-  an envelope-shaped error body.
-- **T0.4** `json` — own parser + serializer (objects, arrays, strings **with unicode escapes
-  incl. `\uXXXX` surrogate pairs combined into U+10000+ code points — 5th-review T3**, numbers,
-  `true`/`false`/`null`), round-tripping to a small DOM/value type, with a **recursion-depth
-  cap** so a deeply nested body (from OFF/LLM) can't stack-overflow (DoS). **Fuzz the parser
-  (5th-review S2):** a libFuzzer/AFL++ harness is part of this task. *Verify:* round-trip tests
-  incl. nested structures, unicode escapes, **surrogate pairs**, big/edge numbers; malformed
-  input → a clear parse error (never a crash); a **past-cap nesting depth is rejected**, not a
-  crash; **the fuzz harness runs clean for a set budget**.
-- **T0.5** `jsonschema` — own validator for the **authored subset** the app uses (types,
-  `required`, `enum`, arrays, **nullability as a `"type":[…,"null"]` union — NOT a `nullable`
-  keyword, which is OpenAPI, not JSON-Schema, and would silently under-validate; 5th-review
-  T3**, and `$ref` to `#/definitions/Macros`), reporting the failing path. Test against a
-  **generic fixture schema authored inline in M0** (types/enum/required/`$ref`) — the real
-  `Recipe`/`Macros` schema is authored later in T1.2, so M0 must not depend on it (5th-review
-  P3). *Verify:* accepts a valid fixture doc; rejects each violation class (wrong type, missing
-  required, bad enum, bad `$ref` target, **`null` in a non-nullable field**) with the path, and
-  **accepts `null` in a `[…,"null"]` field**.
-- **T0.6** `db` — libpq wrapper: a **connection pool**, **parameterized `exec`** (`$1,$2…`
-  binds — SQL is never string-concatenated), result→row mapping, and a transaction helper;
-  plus a **standalone (non-pooled) `connect()`** the migration runner (T1.1) uses to hold its
-  advisory lock on one dedicated connection (D2); plus a **raw `PQexec` path documented as
-  migration-only, never for user input** (migration files are multi-statement, which
-  parameterized `PQexecParams` can't run — developer-authored SQL, so no injection concern;
-  5th-review minor). *Verify:* against a dev Postgres, a
-  parameterized round-trip returns rows; a value containing SQL metacharacters passed as a
-  **bind** is stored/returned literally (injection inert); the pool hands out and returns
-  connections under concurrent use; a standalone connection can be opened outside the pool.
-- **T0.7** App wiring: `main()` starts the `net` server on a port, mounts the `router`, builds
-  the `db` pool from env, adds structured logging + config; `/health` endpoint. *Verify:*
-  the app boots; **`GET /health` → 200 through our own server**; logs show a successful DB
-  connection.
-- **T0.8** `httpclient` — the **own HTTP/1.1 client** that fulfills the `IHttpClient` seam
-  (D3), used by the LLM + OFF clients (T3.2/T4.1/T4.3). Scope: connect over sockets; write an
-  HTTP/1.1 request; read the response incl. **chunked-transfer decode**; response body-size
-  cap; **HTTPS via OpenSSL** for OFF (public internet); **plain HTTP** for the local Ollama
-  path; a read/connect **timeout**.
-  - **TLS must verify the HOSTNAME, not just the chain (5th-review S1 — critical):**
-    `SSL_VERIFY_PEER` alone checks only the certificate *chain*; **SNI
-    (`SSL_set_tlsext_host_name`) does NOT verify anything** (it only tells the server which
-    cert to serve). Without hostname verification, any attacker holding *any* CA-valid cert
-    MITMs the OFF path. So: call **`SSL_set1_host(ssl, host)`** (or `X509_VERIFY_PARAM_set1_host`
-    via `SSL_get0_param`) **before** the handshake, set `SSL_VERIFY_PEER` + SNI, load the trust
-    store (`SSL_CTX_set_default_verify_paths`), and **assert `SSL_get_verify_result == X509_V_OK`**.
-  - *Verify (real network, kept out of the default unit suite):* an HTTPS `GET` to a known good
-    host succeeds; **a valid-CA-but-WRONG-hostname host (e.g. `wrong.host.badssl.com`) is
-    rejected** (this is the case that distinguishes chain-only from real hostname verification —
-    a self-signed/expired host would pass while the code is still exploitable); a **plain-HTTP**
-    GET to a local test server works; a chunked response decodes correctly; the fake
-    `IHttpClient` remains what the T3.2/T4.1/T4.3 unit tests use.
-- **T0.9** `net` **concurrency — thread pool (built LAST in M0, deliberately).** Everything
-  through T0.8 runs single-threaded; this task adds the concurrency model the from-scratch goal
-  is really about (D2), now that sockets/parsing/routing/DB/HTTP-client all work in isolation.
-  Scope: a **fixed-size worker thread pool** (e.g. 4–8 workers, env-configurable); the accept
-  loop hands each accepted connection to a worker; **a worker owns one libpq connection from
-  the `db` pool (T0.6) for the life of the request**, and the blocking `exec`/HTTPS calls run
-  on the worker, never on the accept loop (D2). Bound the work queue; shut the pool down
-  cleanly (drain in-flight, join workers). **Build + test this under TSan** (the config stood
-  up in T0.1) — this and the T0.6 connection pool are the two places data races can live.
-  *Verify:* the server handles **concurrent** keep-alive clients correctly (no interleaved/
-  corrupted responses); **TSan is clean** under concurrent load; the pool bounds its queue
-  rather than growing unboundedly; a clean shutdown drains and joins with no leak (ASAN clean).
-- **🚦 M0 review** — `workflow:review` at the boundary passes _(the libraries are the
-  foundation everything else stands on — worth a careful read)._
+## Milestone 0 — Core-Backend-Bibliotheken (from scratch)
+> Neuer Milestone aus der From-scratch-Wende vom 2026-08-24 (D1). Baut das Plumbing,
+> das ein Framework uns gegeben hätte, damit spätere Milestones Bibliotheken zum
+> Draufstehen haben. Alles hier ist isoliert unit-getestet; noch keine Rezept-Logik.
+- **T0.1** Toolchain + Projekt-Skeleton: ein einfaches **GNU-Makefile** (**C++20**
+  pinnen — 5th-review minor, ein Standard, nicht „C++17/20"), das die **System-(apt-)
+  Pakete** `libpq-dev`, `libssl-dev`, `libutf8proc-dev`, `catch2`/`libcatch2-dev` über
+  **`pkg-config`** findet (`pkg-config --cflags --libs libpq openssl libutf8proc`; kein
+  vcpkg, kein Framework) + das Layout `/backend/lib` (`/net /router /json /jsonschema /db
+  /httpclient`) + `/app` + `/tests` (D1) + ein Catch2-Test-Target. **Warum Make, nicht
+  CMake:** der Build ist **Linux-only** (dev in WSL2, Deploy auf Linux hinter einem VPN —
+  D6), also bringt CMakes Hauptnutzen (Cross-Plattform-Generierung) hier nichts, während ein
+  handgeschriebenes Makefile einfacher ist und die tatsächlichen Compile-/Link-Aufrufe
+  sichtbar hält — was zum Ziel „die Grundlagen lernen" passt (D1). Falls je ein
+  Windows-Target dazukommt, ist der Rückgriff auf CMake ein sauberer späterer Wechsel. **Eine
+  `ASAN+UBSAN`-Build-Config (`-fsanitize=address,undefined`), unter der die Catch2-Suite läuft
+  (5th-review S2 — das wichtigste Sicherheitsnetz beim Handbauen von vier
+  Untrusted-Input-Parsern), als Makefile-Target (z. B. `make asan`), plus TSan-Abdeckung für
+  die Concurrency-Arbeit (der T0.9-thread-pool und der T0.6-db-Connection-Pool).** Außerdem
+  **hier den dev-`docker-compose`-Postgres-Dienst aufstellen** (nach vorn gezogen, damit ganz
+  M0 mit einer DB reden kann — 5th-review P3). Entwickelt wird in **WSL2 (Ubuntu)**. *Verify:*
+  `make` baut; ein trivialer Catch2-Test läuft grün **unter ASAN+UBSAN** (`make asan`); der
+  dev-Postgres-Container kommt hoch.
+- **T0.2** `net` — TCP-Socket-Listener + **HTTP/1.1-Request-Parser** (Request-Line,
+  Header, Body via `Content-Length` **und** chunked) + Response-Writer + keep-alive.
+  **Vorerst single-threaded** — eine Verbindung zur Zeit; der **thread pool ist auf T0.9
+  verschoben** (D2), damit diese Task auf korrekte Socket-Behandlung und HTTP-Parsing ohne
+  Nebenläufigkeit fokussiert bleibt. Härtung: Header-Größe/-Anzahl **und Gesamt-Body-Größe
+  cappen (auch *während* des chunked-Decodings erzwungen, wo es kein Vorab-`Content-Length`
+  gibt)**; Malformtes mit `400` abweisen; ein **Socket-Read-/Idle-Timeout** (Anti-Slowloris).
+  **RFC 7230 §3.3.3 Framing / Anti-Smuggling (5th-review T2):** **sowohl `Content-Length` als
+  auch `Transfer-Encoding` vorhanden** abweisen, **doppeltes/widersprüchliches
+  `Content-Length`** abweisen, nur `Transfer-Encoding: chunked` akzeptieren (sonst `400/501`),
+  **Overflow-Check** von Chunk-Size-Hex und `Content-Length`, und **bare CR / bare LF /
+  eingebettetes NUL** in Request-Line und Headern abweisen. **Den Parser fuzzen (5th-review
+  S2):** ein libFuzzer/AFL++-Harness auf dem HTTP-Parser ist Teil dieser Task. *Verify:*
+  Unit-Tests parsen wohlgeformte und malformte Requests (partiell, übergroße Header, falsches
+  `Content-Length`, **CL+TE beide vorhanden, doppeltes CL, übergroße Chunk-Size, bare CR/LF**);
+  ein Integrationstest macht einen echten localhost-Request; übergroßer Body/Header (inkl. eines
+  chunked-Body über dem Cap) werden abgewiesen, nicht OOM'd; eine stehende Verbindung wird bei
+  Timeout geschlossen; **der Fuzz-Harness läuft sauber über ein gesetztes Budget**.
+- **T0.3** `router` + Request/Response-Abstraktion: `method + path` (mit `:id`-Params) →
+  Handler; unbekannter Pfad → `404`, falsche Methode → `405`; die **Error-Envelope- +
+  Warning-Envelope-Helfer** (D1). *Verify:* Routing-Tests inkl. `:id`-Extraktion, `404`/`405`
+  und ein envelope-förmiger Error-Body.
+- **T0.4** `json` — eigener Parser + Serializer (Objekte, Arrays, Strings **mit
+  Unicode-Escapes inkl. `\uXXXX`-Surrogate-Pairs, zu U+10000+-Codepoints kombiniert —
+  5th-review T3**, Zahlen, `true`/`false`/`null`), Round-Trip zu einem kleinen DOM/Value-Typ,
+  mit einem **Rekursionstiefen-Cap**, damit ein tief verschachtelter Body (von OFF/LLM) keinen
+  Stack-Overflow (DoS) auslösen kann. **Den Parser fuzzen (5th-review S2):** ein
+  libFuzzer/AFL++-Harness ist Teil dieser Task. *Verify:* Round-Trip-Tests inkl. verschachtelter
+  Strukturen, Unicode-Escapes, **Surrogate-Pairs**, große/Edge-Zahlen; malformter Input → ein
+  klarer Parse-Fehler (nie ein Crash); eine **Tiefe über dem Cap wird abgewiesen**, kein Crash;
+  **der Fuzz-Harness läuft sauber über ein gesetztes Budget**.
+- **T0.5** `jsonschema` — eigener Validator für die **authored subset**, die die App
+  nutzt (Typen, `required`, `enum`, Arrays, **Nullability als `"type":[…,"null"]`-Union — NICHT
+  ein `nullable`-Keyword, das OpenAPI ist, nicht JSON-Schema, und still unter-validieren würde;
+  5th-review T3**, und `$ref` auf `#/definitions/Macros`), meldet den fehlerhaften Pfad.
+  Getestet gegen ein **generisches Fixture-Schema, inline in M0 verfasst**
+  (Typen/enum/required/`$ref`) — das echte `Recipe`/`Macros`-Schema wird später in T1.2
+  verfasst, also darf M0 nicht davon abhängen (5th-review P3). *Verify:* akzeptiert ein valides
+  Fixture-Dokument; weist jede Verletzungsklasse (falscher Typ, fehlendes required, falsches
+  enum, falsches `$ref`-Ziel, **`null` in einem non-nullable Feld**) mit dem Pfad ab, und
+  **akzeptiert `null` in einem `[…,"null"]`-Feld**.
+- **T0.6** `db` — libpq-Wrapper: ein **Connection-Pool**, **parametrisiertes `exec`**
+  (`$1,$2…`-Binds — SQL wird nie string-konkateniert), Result→Row-Mapping und ein
+  Transaktions-Helfer; plus ein **standalone (nicht gepooltes) `connect()`**, das der
+  Migration-Runner (T1.1) nutzt, um seinen Advisory-Lock auf einer dedizierten Connection zu
+  halten (D2); plus ein **rohes `PQexec`, dokumentiert als migration-only, nie für User-Input**
+  (Migrationsdateien sind mehr-Statement, was parametrisiertes `PQexecParams` nicht ausführen
+  kann — Entwickler-verfasste SQL, also kein Injection-Bedenken; 5th-review minor). *Verify:*
+  gegen ein dev-Postgres liefert ein parametrisierter Round-Trip Zeilen; ein Wert mit
+  SQL-Metazeichen, als **Bind** übergeben, wird literal gespeichert/zurückgegeben (Injection
+  inert); der Pool gibt Connections unter nebenläufiger Nutzung aus und nimmt sie zurück; eine
+  standalone-Connection kann außerhalb des Pools geöffnet werden.
+- **T0.7** App-Wiring: `main()` startet den `net`-Server auf einem Port, mountet den
+  `router`, baut den `db`-Pool aus env, ergänzt strukturiertes Logging + Config;
+  `/health`-Endpoint. *Verify:* die App bootet; **`GET /health` → 200 durch unseren eigenen
+  Server**; Logs zeigen eine erfolgreiche DB-Connection.
+- **T0.8** `httpclient` — der **eigene HTTP/1.1-Client**, der den `IHttpClient`-Seam
+  erfüllt (D3), genutzt von den LLM- + OFF-Clients (T3.2/T4.1/T4.3). Scope: über Sockets
+  verbinden; einen HTTP/1.1-Request schreiben; die Response inkl. **chunked-Transfer-Decode**
+  lesen; Response-Body-Größen-Cap; **HTTPS über OpenSSL** für OFF (öffentliches Internet);
+  **plain HTTP** für den lokalen Ollama-Pfad; ein Read-/Connect-**Timeout**.
+  - **TLS muss den HOSTNAME verifizieren, nicht nur die Chain (5th-review S1 — kritisch):**
+    `SSL_VERIFY_PEER` allein prüft nur die Zertifikats-*Chain*; **SNI
+    (`SSL_set_tlsext_host_name`) verifiziert NICHTS** (es sagt dem Server nur, welches Cert er
+    servieren soll). Ohne Hostname-Verifikation MITMt jeder Angreifer mit *irgendeinem*
+    CA-validen Cert den OFF-Pfad. Also: **`SSL_set1_host(ssl, host)`** (oder
+    `X509_VERIFY_PARAM_set1_host` via `SSL_get0_param`) **vor** dem Handshake aufrufen,
+    `SSL_VERIFY_PEER` + SNI setzen, den Trust-Store laden
+    (`SSL_CTX_set_default_verify_paths`) und **`SSL_get_verify_result == X509_V_OK` asserten**.
+  - *Verify (echtes Netz, aus der Default-Unit-Suite herausgehalten):* ein HTTPS-`GET` zu
+    einem bekannt guten Host gelingt; **ein Host mit validem CA, aber FALSCHEM Hostname (z. B.
+    `wrong.host.badssl.com`) wird abgewiesen** (das ist der Fall, der chain-only von echter
+    Hostname-Verifikation unterscheidet — ein selbst-signierter/abgelaufener Host würde
+    durchgehen, während der Code noch exploitierbar ist); ein **plain-HTTP**-GET zu einem
+    lokalen Test-Server funktioniert; eine chunked-Response dekodiert korrekt; der
+    Fake-`IHttpClient` bleibt das, was die T3.2/T4.1/T4.3-Unit-Tests nutzen.
+- **T0.9** `net` **Nebenläufigkeit — thread pool (zuletzt in M0 gebaut, bewusst).** Alles
+  bis T0.8 läuft single-threaded; diese Task fügt das Concurrency-Modell hinzu, um das es beim
+  From-scratch-Ziel wirklich geht (D2), jetzt wo Sockets/Parsing/Routing/DB/HTTP-Client alle
+  isoliert funktionieren. Scope: ein **fester Worker-Thread-Pool** (z. B. 4–8 Worker,
+  env-konfigurierbar); der Accept-Loop übergibt jede akzeptierte Verbindung an einen Worker;
+  **ein Worker besitzt eine libpq-Connection aus dem `db`-Pool (T0.6) für die Lebensdauer des
+  Requests**, und die blockierenden `exec`-/HTTPS-Aufrufe laufen auf dem Worker, nie auf dem
+  Accept-Loop (D2). Die Work-Queue beschränken; den Pool sauber herunterfahren (In-Flight
+  drainen, Worker joinen). **Unter TSan bauen + testen** (die Config in T0.1 aufgestellt) —
+  dies und der T0.6-Connection-Pool sind die zwei Stellen, an denen Data-Races leben können.
+  *Verify:* der Server behandelt **nebenläufige** keep-alive-Clients korrekt (keine
+  verschränkten/korrupten Antworten); **TSan ist sauber** unter nebenläufiger Last; der Pool
+  beschränkt seine Queue, statt unbegrenzt zu wachsen; ein sauberes Shutdown drainet und joint
+  ohne Leak (ASAN sauber).
+- **M0-Review** — der `workflow:review` an der Grenze besteht _(die Bibliotheken sind das
+  Fundament, auf dem alles andere steht — eine sorgfältige Lektüre wert)._
 
-## Milestone 1 — Schema, DB, browse API (on the M0 libs)
-- **T1.1** **Migration runner** (on the M0 `db` lib) with a `schema_migrations` table: plain
-  SQL files, each migration in its **own transaction** (version recorded only on success),
-  the runner holding a **session-level `pg_advisory_lock` on one dedicated libpq connection
-  across all the per-migration transactions** (releasing at the end) so concurrent boots
-  serialize (Q7 + 2nd-review Major 3, per D2); `docker-compose` with a postgres service for
-  dev. *Verify:* migrations apply on boot; re-running does not re-apply; a deliberately
-  failing migration leaves `schema_migrations` unchanged (that migration's transaction rolls
-  back).
-- **T1.2** `Recipe` JSON Schema in `docs/` (source of truth — the **locked field list**
-  above), authored to the **self-consistent subset our own validator implements** (D2 — not
-  bound to a library's draft). **Also author the macro body as a named sub-schema
-  `definitions/Macros`** (the `{calories,protein,carbs,fat}` shape), referenced by
-  `macrosPerServing` via `"$ref": "#/definitions/Macros"`; `POST /api/macros/compute` and
-  `POST /api/macros/estimate` validate their request/response macro bodies against it, and the
-  Ollama `format` for the macro estimator (D3) uses the same sub-schema — so the D1 `422` path
-  and every "schema-validated **macro** body" step has one authored schema, not a second
-  source of truth (3rd-review minor #3). SQL migrations for the **relational shape decided in D2/B1**:
-  `users` stub; `recipes` (nullable `owner_id`, scalar fields, **per-serving macro columns
-  cal/protein/carbs/fat, `total_weight_g`, `macro_source`, `macros_estimated`**); **child tables
-  `recipe_ingredients`** (FK, `position`, nullable
-  `quantity`/`unit`/`group_label`/`food_id`/`note` — **`food_id` is a plain nullable UUID
-  column here, no FK yet** (the `foods` table lands in T4.1), and the section column is
-  `group_label` not the reserved word `group`; language-neutral unit vocabulary),
-  **`recipe_steps`** (FK, `position`, `text`),
-  **`recipe_images`** (FK, `position`, `url`); **join table `recipe_tags`** (FK, `tag`,
-  `position`) — all child/join FKs **`ON DELETE CASCADE`**; C++ model structs + **our own JSON
-  (de)serialization (M0 `json`)** that **assemble/emit the canonical `Recipe` JSON from these
-  tables** (note the JSON↔column name maps, e.g. `macrosPerServing.calories` ↔ column `cal`) +
-  a validation function using the **M0 `jsonschema` validator**. *Verify:* migrations apply on
-  a fresh DB; unit test round-trips a `Recipe` struct↔JSON (via the child tables) — including a
-  **grouped, to-taste-ingredient recipe** (null quantity/unit), ordered `steps`, an
-  **empty-`steps`** recipe, **`tags[]` + `images[]` with order preserved**, **and
-  `macrosEstimated: true` surviving the round-trip** — and the validator **rejects a
-  schema-invalid document** and accepts a valid one.
-- **T1.3** Recipe repository/service (create, read, list, update, delete) via the **M0 `db`
-  lib** (parameterized `exec`) — writing/reading across the parent + child tables in a
-  transaction; per-100 g derived computation. **Update (PUT) strategy (2nd-review blocker):
-  a full-replace within one transaction** — the client PUTs the *complete* recipe (the M2
-  form already holds every ingredient's `foodId`, so it round-trips them), and the service
-  replaces the child rows from that payload, reassigning `position` from array order; **a
-  picked `food_id` survives an edit** because the payload carries it (a bare
-  delete-and-reinsert that dropped `food_id` is explicitly rejected). **On PUT the backend
-  recomputes `macrosEstimated` from the payload's ingredient/weight resolution — EXCEPT when
-  `macroSource=="manual"`, where the client's flag is honored as-is (4th-review Red #2):** a
-  manual edit asserts exact values and clears the flag (per the format precedence rule), so a
-  recompute over still-approximate ingredient units must **not** flip it back to `true` and
-  re-introduce the "guessed shown as exact" state. Recompute applies only to the
-  `ingredients`/`llm` sources. **Image-file GC (3rd-review minor #6):**
-  because `ON DELETE CASCADE` removes `recipe_images` rows, the service **reads the owned
-  image filenames first**, then deletes the recipe, then unlinks the backend-owned files
-  (best-effort, logged on failure — an orphaned file is a warning, never a failed request);
-  on PUT it diffs old vs. new image URLs and unlinks the dropped **owned** files after commit
-  (external-URL images are store-only — never touched). *Verify:* integration tests run
-  against a **dedicated test Postgres** (compose service; migrations applied before the
-  suite; **each test truncates the recipe tables** for determinism — Q1) for CRUD incl. a
-  multi-group/multi-step recipe, **a PUT edit that preserves `food_id` picks and reorders
-  ingredients**, plus a unit test for per-100 g (incl. the "no weight" → null path).
-- **T1.4** REST controllers `GET /api/recipes` (**paginated summary list** — `?limit=&offset=`,
-  summary projection per D1, not full child-assembled objects) and `GET /api/recipes/:id`
-  (full canonical `Recipe`); seed 2–3 example recipes (**with `food_id` left null** so the
-  T4.1 FK-add finds no orphans). *Verify:* integration test hits both endpoints — the list
-  returns summaries honoring `limit`/`offset`, `/:id` returns a schema-valid full `Recipe`.
+## Milestone 1 — Schema, DB, Browse-API (auf den M0-Libs)
+- **T1.1** **Migration-Runner** (auf der M0-`db`-Lib) mit einer
+  `schema_migrations`-Tabelle: einfache SQL-Dateien, jede Migration in ihrer **eigenen
+  Transaktion** (Version nur bei Erfolg festgehalten), der Runner hält einen **session-level
+  `pg_advisory_lock` auf einer dedizierten libpq-Connection über alle
+  Per-Migration-Transaktionen hinweg** (am Ende freigegeben), sodass nebenläufige Boots
+  serialisieren (Q7 + 2nd-review Major 3, gemäß D2); `docker-compose` mit einem Postgres-Dienst
+  für dev. *Verify:* Migrationen wenden beim Boot an; ein erneuter Lauf wendet nicht erneut an;
+  eine absichtlich fehlschlagende Migration lässt `schema_migrations` unverändert (die
+  Transaktion dieser Migration rollt zurück).
+- **T1.2** `Recipe`-JSON-Schema in `docs/` (Source of Truth — die **festgelegte
+  Feldliste** oben), verfasst zu der **in sich konsistenten Teilmenge, die unser eigener
+  Validator implementiert** (D2 — nicht an den Draft einer Library gebunden). **Außerdem den
+  Makro-Body als benanntes Sub-Schema `definitions/Macros` verfassen** (die
+  `{calories,protein,carbs,fat}`-Form), referenziert von `macrosPerServing` via `"$ref":
+  "#/definitions/Macros"`; `POST /api/macros/compute` und `POST /api/macros/estimate`
+  validieren ihre Request-/Response-Makro-Bodies dagegen, und das Ollama-`format` für den
+  Makro-Schätzer (D3) nutzt dasselbe Sub-Schema — sodass der D1-`422`-Pfad und jeder
+  „schema-validated **macro** body"-Schritt ein verfasstes Schema hat, keine zweite Source of
+  Truth (3rd-review minor #3). SQL-Migrationen für die **in D2/B1 entschiedene relationale
+  Form**: `users`-Stub; `recipes` (nullable `owner_id`, Skalar-Felder, **Makro-Spalten pro
+  Portion cal/protein/carbs/fat, `total_weight_g`, `macro_source`, `macros_estimated`**);
+  **Kind-Tabellen `recipe_ingredients`** (FK, `position`, nullable
+  `quantity`/`unit`/`group_label`/`food_id`/`note` — **`food_id` ist hier eine einfache nullable
+  UUID-Spalte, noch kein FK** (die `foods`-Tabelle landet in T4.1), und die Section-Spalte ist
+  `group_label`, nicht das reservierte Wort `group`; sprach-neutrales Einheiten-Vokabular),
+  **`recipe_steps`** (FK, `position`, `text`), **`recipe_images`** (FK, `position`, `url`);
+  **Join-Tabelle `recipe_tags`** (FK, `tag`, `position`) — alle Kind-/Join-FKs **`ON DELETE
+  CASCADE`**; C++-Model-Structs + **unsere eigene JSON-(De)Serialisierung (M0 `json`)**, die
+  **das kanonische `Recipe`-JSON aus diesen Tabellen zusammensetzt/emittiert** (beachte die
+  JSON↔Spalten-Namens-Maps, z. B. `macrosPerServing.calories` ↔ Spalte `cal`) + eine
+  Validierungsfunktion mit dem **M0-`jsonschema`-Validator**. *Verify:* Migrationen wenden auf
+  einer frischen DB an; ein Unit-Test round-trippt ein `Recipe`-Struct↔JSON (über die
+  Kind-Tabellen) — inkl. eines **gruppierten, to-taste-Zutaten-Rezepts** (null quantity/unit),
+  geordneter `steps`, eines **leeren-`steps`**-Rezepts, **`tags[]` + `images[]` mit erhaltener
+  Reihenfolge** **und `macrosEstimated: true`, das den Round-Trip überlebt** — und der Validator
+  **weist ein schema-invalides Dokument ab** und akzeptiert ein valides.
+- **T1.3** Recipe-Repository/Service (create, read, list, update, delete) über die **M0-
+  `db`-Lib** (parametrisiertes `exec`) — schreibt/liest über die Eltern- + Kind-Tabellen in
+  einer Transaktion; per-100-g-abgeleitete Berechnung. **Update-(PUT-)Strategie (2nd-review
+  Blocker): ein Full-Replace innerhalb einer Transaktion** — der Client PUTet das *komplette*
+  Rezept (das M2-Formular hält bereits jeden `foodId` der Zutaten, also round-trippt es sie),
+  und der Service ersetzt die Kind-Zeilen aus diesem Payload und weist `position` aus der
+  Array-Reihenfolge neu zu; **ein gewählter `food_id` überlebt eine Bearbeitung**, weil der
+  Payload ihn trägt (ein bloßes delete-and-reinsert, das `food_id` fallen ließe, wird
+  ausdrücklich abgelehnt). **Bei PUT berechnet das Backend `macrosEstimated` aus der Zutaten-/
+  Gewichts-Auflösung des Payloads neu — AUSSER wenn `macroSource=="manual"`, wo das Flag des
+  Clients unverändert übernommen wird (4th-review Red #2):** eine manuelle Bearbeitung behauptet
+  exakte Werte und löscht das Flag (gemäß der Format-Präzedenz-Regel), also darf ein Recompute
+  über noch-approximative Zutaten-Einheiten es **nicht** wieder auf `true` kippen und den
+  Zustand „geraten als exakt gezeigt" wieder einführen. Recompute gilt nur für die
+  `ingredients`-/`llm`-Quellen. **Bild-Datei-GC (3rd-review minor #6):** weil `ON DELETE
+  CASCADE` die `recipe_images`-Zeilen entfernt, liest der Service **zuerst die eigenen
+  Bild-Dateinamen**, löscht dann das Rezept, dann unlinkt er die backend-eigenen Dateien
+  (best-effort, bei Fehler geloggt — eine verwaiste Datei ist eine Warnung, nie ein
+  fehlgeschlagener Request); bei PUT diffed er alte vs. neue Bild-URLs und unlinkt die
+  fallengelassenen **eigenen** Dateien nach dem Commit (externe-URL-Bilder sind nur-speichern —
+  nie angefasst). *Verify:* Integrationstests laufen gegen ein **dediziertes Test-Postgres**
+  (Compose-Dienst; Migrationen vor der Suite angewendet; **jeder Test truncatet die
+  Rezept-Tabellen** zum Determinismus — Q1) für CRUD inkl. eines Multi-Group-/Multi-Step-Rezepts,
+  **einer PUT-Bearbeitung, die `food_id`-Picks erhält und Zutaten umsortiert**, plus ein
+  Unit-Test für per 100 g (inkl. des „kein Gewicht" → null-Pfads).
+- **T1.4** REST-Controller `GET /api/recipes` (**paginierte Summary-Liste** —
+  `?limit=&offset=`, Summary-Projektion gemäß D1, nicht die voll aus Kind-Tabellen
+  zusammengesetzten Objekte) und `GET /api/recipes/:id` (volles kanonisches `Recipe`); seede
+  2–3 Beispiel-Rezepte (**mit `food_id` auf null gelassen**, damit der T4.1-FK-Add keine Waisen
+  findet). *Verify:* ein Integrationstest trifft beide Endpoints — die Liste liefert Summaries,
+  die `limit`/`offset` respektieren, `/:id` liefert ein schema-valides volles `Recipe`.
 
-## Milestone 2 — Frontend scaffold, browse/detail, structured form
-- **T2.0** UI mockups (design before build) — mock the key screens in `docs/mockups/`
-  (browse/list + search bar, detail with macro tables/`—`/estimated + `macroSource` badge,
-  add/edit form incl. tags/favorite/notes/times, paste import editable preview, OFF
-  search-and-pick, empty/error/warning states). *Verify:* each screen has an agreed mock so
-  T2.1–T2.3 build against a decided design. _(This task is the plan's owner of the mockup step
-  the ROADMAP tracks as T2.0 — the two now agree; 4th-review minor.)_
-- **T2.1** Angular CLI scaffold (**exact pinned version `17.x.y`**, not `^17` — Q3) + **dev `proxy.conf.json`**
-  (`/api` → backend) + typed API service (`HttpClient`) **coding against the D1 error
-  envelope** (one `{error:{code,message,details}}` shape) + browse list page (**consuming the
-  paginated summary list**) + detail page rendering title, image, source link, ingredients,
-  steps, both macro tables, **and `tags` (chips), `favorite` (star), `notes`,
-  `prepTimeMin`/`cookTimeMin` (4th-review Red #1 — these fields exist in the format and are
-  filtered on in T5.2, so they must render), and each ingredient's per-row `note` (e.g.
-  "(uncooked weight)") so notes don't silently vanish (5th-review minor)** (**showing the "estimated" marker when
-  `macrosEstimated` — on both the detail page and the browse list, which the summary
-  projection already carries the flag for — plus a small `macroSource` badge
-  (ingredients/llm/manual) on the detail page so provenance survives reload; **the badge is
-  omitted when `macrosPerServing` is unset/all-zero**, so a macro-less recipe shows none**).
-  *Verify:* `ng build` passes and `ng test` runs green using **ChromeHeadlessNoSandbox**
-  (Chromium installed in the test env); against the running API (via the dev proxy) the
-  list + a detail page render a seeded recipe with both macro columns (component test
-  where practical).
-- **T2.2** Add/Edit form built with Angular **Reactive Forms** (title, description,
-  servings, weight, dynamic ingredient-row `FormArray`, steps, source URL, images, macro
-  fields, **`tags` (add/remove chips — the *only* way tags are set, since the parser never
-  auto-tags), `favorite` (toggle), `notes`, `prepTimeMin`, `cookTimeMin`** — 4th-review Red
-  #1: without these the T5.2 tag/favorite filters would be dead on arrival) → `POST`/**`PUT
-  /api/recipes/:id`** with **server-side validation** in the backend (**schema-invalid → `422`
-  with failing paths in the error envelope; unknown id → `404`** — the id is in the PUT URL,
-  per D1); **`PUT` sends the complete recipe** so `food_id` picks survive the full-replace
-  (T1.3). Plus a **`DELETE /api/recipes/:id`** controller (exposing the T1.3 repository
-  `delete`; child rows cascade) wired to a delete action in the UI with a confirm. *Verify:*
-  a valid submission persists and appears in browse; **a recipe saved with tags + favorite
-  round-trips and is then found by the T5.2 tag/favorite filters**; **a schema-invalid POST
-  returns `422` with the error envelope**; **a PUT edit preserves picked `food_id`s**;
-  **deleting a recipe removes it (and its child rows) from `GET /api/recipes`** (backend
-  validation + delete API test + a form-validation component test).
-- **T2.3** Wire **manual macro entry + override** into the form (self-contained; no
-  nutrition DB yet). *Verify:* a recipe saved with manually entered macros persists and
-  renders both macro columns; per-100 g shows "—" when no weight is given. _(Auto
-  "compute from ingredients" is deferred to M4 — see T4.2b — because the compute path
-  does not exist until the nutrition DB lands.)_
+## Milestone 2 — Frontend-Scaffold, Browse/Detail, strukturiertes Formular
+- **T2.0** UI-Mockups (Design vor dem Bau) — die Schlüssel-Screens in `docs/mockups/`
+  mocken (Browse/Liste + Suchleiste, Detail mit Makro-Tabellen/`—`/estimated +
+  `macroSource`-Badge, Add/Edit-Formular inkl. Tags/Favorit/Notizen/Zeiten, Paste-Import
+  editierbare Preview, OFF-Suche-und-Auswahl, Empty-/Error-/Warning-States). *Verify:* jeder
+  Screen hat einen abgestimmten Mock, damit T2.1–T2.3 gegen ein entschiedenes Design bauen.
+  _(Diese Task ist der Owner des Mockup-Schritts im Plan, den die ROADMAP als T2.0 führt — die
+  zwei stimmen jetzt überein; 4th-review minor.)_
+- **T2.1** Angular-CLI-Scaffold (**exakt gepinnte Version `17.x.y`**, nicht `^17` — Q3) +
+  **dev-`proxy.conf.json`** (`/api` → Backend) + typisierter API-Service (`HttpClient`), der
+  **gegen den D1-Error-Envelope codet** (eine `{error:{code,message,details}}`-Form) +
+  Browse-Listen-Seite (**die paginierte Summary-Liste konsumierend**) + Detail-Seite, die
+  Titel, Bild, Quell-Link, Zutaten, Steps, beide Makro-Tabellen rendert, **und `tags` (Chips),
+  `favorite` (Stern), `notes`, `prepTimeMin`/`cookTimeMin` (4th-review Red #1 — diese Felder
+  existieren im Format und werden in T5.2 gefiltert, also müssen sie rendern), und die
+  per-Zeile-`note` jeder Zutat (z. B. „(uncooked weight)"), damit Notizen nicht still
+  verschwinden (5th-review minor)** (**den „estimated"-Marker zeigend, wenn `macrosEstimated` —
+  sowohl auf der Detail-Seite als auch in der Browse-Liste, deren Summary-Projektion das Flag
+  bereits trägt — plus ein kleines `macroSource`-Badge (ingredients/llm/manual) auf der
+  Detail-Seite, damit die Provenienz das Neuladen überlebt; **das Badge wird weggelassen, wenn
+  `macrosPerServing` ungesetzt/all-zero ist**, sodass ein makro-loses Rezept keines zeigt**).
+  *Verify:* `ng build` besteht und `ng test` läuft grün mit **ChromeHeadlessNoSandbox**
+  (Chromium in der Test-Umgebung installiert); gegen die laufende API (über den dev-Proxy)
+  rendern die Liste + eine Detail-Seite ein geseedetes Rezept mit beiden Makro-Spalten
+  (Component-Test wo praktikabel).
+- **T2.2** Add/Edit-Formular mit Angular **Reactive Forms** (Titel, Beschreibung,
+  servings, Gewicht, dynamisches Zutaten-Zeilen-`FormArray`, steps, Quell-URL, Bilder,
+  Makro-Felder, **`tags` (Chips hinzufügen/entfernen — der *einzige* Weg, Tags zu setzen, da
+  der Parser nie auto-taggt), `favorite` (Toggle), `notes`, `prepTimeMin`, `cookTimeMin`** —
+  4th-review Red #1: ohne diese wären die T5.2-Tag-/Favorit-Filter von Anfang an tot) →
+  `POST`/**`PUT /api/recipes/:id`** mit **serverseitiger Validierung** im Backend
+  (**schema-invalid → `422`** mit den fehlerhaften Pfaden im Error-Envelope; **unbekannte id →
+  `404`** — die id steht in der PUT-URL, gemäß D1); **`PUT` schickt das komplette Rezept**,
+  damit `food_id`-Picks den Full-Replace überleben (T1.3). Plus ein **`DELETE
+  /api/recipes/:id`**-Controller (der das T1.3-Repository-`delete` freilegt; Kind-Zeilen
+  kaskadieren), verdrahtet mit einer Delete-Aktion in der UI mit einer Bestätigung. *Verify:*
+  eine valide Eingabe persistiert und erscheint im Browse; **ein mit Tags + Favorit
+  gespeichertes Rezept round-trippt und wird dann von den T5.2-Tag-/Favorit-Filtern
+  gefunden**; **ein schema-invalider POST liefert `422`** mit dem Error-Envelope; **eine
+  PUT-Bearbeitung erhält gewählte `food_id`s**; **das Löschen eines Rezepts entfernt es (und
+  seine Kind-Zeilen) aus `GET /api/recipes`** (Backend-Validierung + Delete-API-Test + ein
+  Formular-Validierungs-Component-Test).
+- **T2.3** **Manuelle Makro-Eingabe + Override** ins Formular verdrahten (self-contained;
+  noch keine Nährwert-DB). *Verify:* ein mit manuell eingegebenen Makros gespeichertes Rezept
+  persistiert und rendert beide Makro-Spalten; per 100 g zeigt „—", wenn kein Gewicht angegeben
+  ist. _(Auto-„compute from ingredients" ist auf M4 verschoben — siehe T4.2b — weil der
+  Compute-Pfad nicht existiert, bis die Nährwert-DB kommt.)_
 
-## Milestone 3 — Paste import with selectable engine
-- **T3.1** `RecipeParser` interface + `RuleBasedParser` in C++ + `POST /api/parse`.
-  Scope is **social captions only** (TikTok/Instagram); the rule-based engine is the
-  **best-effort primary** parser (LLM is the fallback in T3.2).
-  Concrete patterns to handle (from the worked German + English caption examples):
-  **ingredient sections** (`🍗 Für das Hähnchen:` / `Crispy Beef Strips` → each row's
-  `group`); **quantity/unit regex** over the language-neutral vocabulary (`600 g`,
-  `140 ml`, `2 Knoblauchzehen`→`Stück`, `1 TL`, `2 tbsp`; a bare `tsp black pepper`
-  defaults to quantity 1); **parentheticals → `note`** (`(diced)`, `(uncooked weight)`,
-  `(tenderises the beef)`); **servings** from prose (`4 Portionen`, `Serves 4`); a
-  **macro block** by label synonyms (`kcal`/`calories`; `Eiweiß`/`Protein`/`P`;
-  `Kohlenhydrate`/`Carbs`/`C`; `Fett`/`Fat`/`F`) in any order → `macrosPerServing`,
-  `macroSource: "manual"`; **hashtag walls + emoji stripped** (never auto-tagged);
-  **to-taste rows** (`Salz + Pfeffer`, `Petersilie zum garnieren`) → null quantity/unit;
-  and any **storage/reheating block → `notes`**. Steps may be absent (video-only).
-  **UTF-8 handling per D4/B3: NFC-normalize the input first — via `utf8proc`** (`utf8proc_NFC`;
-  pasted captions may arrive NFD-decomposed, e.g. `ä` = `a`+U+0308, which would break
-  whole-token matches for `Eiweiß`/`Hähnchen` and codepoint-range emoji stripping; full NFC
-  needs Unicode tables, so this is the one place we use an external — 4th-review Major), then
-  **our own UTF-8 scanning (no `std::regex`, no regex engine), codepoint-range emoji/symbol
-  stripping, and line-start-anchored quantities** so `140ml … 7%` doesn't misread `7`.
-  **Partial-parse behavior (4th-review minor):** `/api/parse` **always returns a draft, never
-  `422`** — a caption the rules only partially parse (e.g. no title) yields a partial `Recipe`
-  draft (200 + the warning envelope) that lands in the editable preview for the human to
-  complete; strict schema validation applies on **save** (T2.2), not on parse. *Verify:* unit
-  tests parse the three representative captions into the expected structured fields, including
-  grouping, null-quantity rows, the extracted macro block, empty steps, **correct emoji/umlaut
-  handling (`Eiweiß`, `Hähnchen`), an NFD-decomposed input variant (utf8proc NFC), and the
-  `7%`-not-a-quantity case**; a deliberately partial caption returns a partial draft + warning,
-  not a `422`.
-- **T3.2** `LlmClient` (on the **`IHttpClient` seam** from D3/B2 — real impl is the T0.8
-  `httpclient`, plain-HTTP for local Ollama) + `LlmParser` (Ollama
-  native `/api/chat` `format`=schema by default, OpenAI-compatible fallback; schema
-  validation; fallback on invalid). Documented fallback = on invalid/unparseable LLM JSON,
-  return a **best-effort or empty draft into the editable preview with a warning** (no
-  auto-retry, no silent save). *Verify:* unit test with the **fake `IHttpClient`** (no live
-  LLM, no real network) asserts valid JSON is accepted and malformed JSON triggers that
-  documented fallback — an empty/partial draft plus a warning flag, not an exception or a
-  saved record.
-- **T3.3** Paste screen: textarea, engine toggle (rule-based / local LLM), parse →
-  **editable preview form** (reuses M2 form) → save. *Verify:* pasting a sample with the
-  rule-based engine produces a pre-filled, editable form that saves correctly.
+## Milestone 3 — Paste-Import mit wählbarer Engine
+- **T3.1** `RecipeParser`-Interface + `RuleBasedParser` in C++ + `POST /api/parse`. Scope
+  ist **nur Social-Captions** (TikTok/Instagram); die regelbasierte Engine ist der
+  **Best-Effort-Primär**-Parser (LLM ist der Fallback in T3.2). Konkrete zu behandelnde Muster
+  (aus den durchgearbeiteten deutschen + englischen Caption-Beispielen): **Zutaten-Sections**
+  (`🍗 Für das Hähnchen:` / `Crispy Beef Strips` → jeder Zeilen-`group`); **Menge/Einheit-Regex**
+  über das sprach-neutrale Vokabular (`600 g`, `140 ml`, `2 Knoblauchzehen`→`Stück`, `1 TL`,
+  `2 tbsp`; ein bloßes `tsp black pepper` defaultet auf quantity 1); **Klammerausdrücke →
+  `note`** (`(diced)`, `(uncooked weight)`, `(tenderises the beef)`); **servings** aus Prosa
+  (`4 Portionen`, `Serves 4`); ein **Makro-Block** über Label-Synonyme (`kcal`/`calories`;
+  `Eiweiß`/`Protein`/`P`; `Kohlenhydrate`/`Carbs`/`C`; `Fett`/`Fat`/`F`) in beliebiger
+  Reihenfolge → `macrosPerServing`, `macroSource: "manual"`; **Hashtag-Wände + Emoji gestrippt**
+  (nie auto-getaggt); **to-taste-Zeilen** (`Salz + Pfeffer`, `Petersilie zum garnieren`) → null
+  quantity/unit; und jeder **Aufbewahrungs-/Aufwärm-Block → `notes`**. Steps können fehlen
+  (video-only). **UTF-8-Behandlung gemäß D4/B3: den Input zuerst NFC-normalisieren — via
+  `utf8proc`** (`utf8proc_NFC`; eingefügte Captions kommen evtl. NFD-dekomponiert an, z. B. `ä`
+  = `a`+U+0308, was Ganz-Token-Matches für `Eiweiß`/`Hähnchen` und das
+  Codepoint-Range-Emoji-Stripping brechen würde; volles NFC braucht Unicode-Tabellen, also ist
+  das die eine Stelle, wo wir eine externe Lib nutzen — 4th-review Major), dann **unser eigenes
+  UTF-8-Scanning (kein `std::regex`, keine Regex-Engine), Codepoint-Range-Emoji-/
+  Symbol-Stripping und zeilen-anfang-verankerte Mengen**, damit `140ml … 7%` die `7` nicht
+  falsch liest. **Partial-Parse-Verhalten (4th-review minor):** `/api/parse` **liefert immer
+  einen Draft, nie `422`** — eine Caption, die die Regeln nur teilweise parsen (z. B. kein
+  Titel), ergibt einen partiellen `Recipe`-Draft (200 + der Warning-Envelope), der in der
+  editierbaren Preview landet, damit der Mensch ihn vervollständigt; strikte Schema-Validierung
+  gilt beim **Speichern** (T2.2), nicht beim Parsen. *Verify:* Unit-Tests parsen die drei
+  repräsentativen Captions in die erwarteten strukturierten Felder, inkl. Gruppierung,
+  null-quantity-Zeilen, dem extrahierten Makro-Block, leeren Steps, **korrekter Emoji-/
+  Umlaut-Behandlung (`Eiweiß`, `Hähnchen`), einer NFD-dekomponierten Input-Variante (utf8proc
+  NFC) und dem `7%`-kein-Menge-Fall**; eine absichtlich partielle Caption liefert einen
+  partiellen Draft + Warnung, kein `422`.
+- **T3.2** `LlmClient` (auf dem **`IHttpClient`-Seam** aus D3/B2 — die echte Impl ist der
+  T0.8-`httpclient`, plain-HTTP für lokales Ollama) + `LlmParser` (Ollama nativ `/api/chat`
+  `format`=schema standardmäßig, OpenAI-kompatibler Fallback; Schema-Validierung; Fallback bei
+  invalid). Dokumentierter Fallback = bei invalidem/unparsbarem LLM-JSON einen **Best-Effort-
+  oder leeren Draft in die editierbare Preview mit einer Warnung** zurückgeben (kein Auto-Retry,
+  kein stilles Speichern). *Verify:* Unit-Test mit dem **Fake-`IHttpClient`** (kein Live-LLM,
+  kein echtes Netz) prüft, dass valides JSON akzeptiert wird und malformtes JSON diesen
+  dokumentierten Fallback auslöst — ein leerer/partieller Draft plus ein Warn-Flag, keine
+  Exception und kein gespeicherter Record.
+- **T3.3** Paste-Screen: Textarea, Engine-Toggle (regelbasiert / lokales LLM), Parse →
+  **editierbares Preview-Formular** (nutzt das M2-Formular wieder) → speichern. *Verify:* das
+  Einfügen eines Samples mit der regelbasierten Engine erzeugt ein vorbefülltes, editierbares
+  Formular, das korrekt speichert.
 
-## Milestone 4 — Macros from Open Food Facts (search & pick) + LLM estimate
-- **T4.1** `NutritionSource` interface + **OFF client** (on the **`IHttpClient` seam**
-  from D3/B2 — real impl is the T0.8 `httpclient`, **HTTPS with cert verification** to the
-  public OFF host → **OFF API v2 search `/api/v2/search`** primary (**not** Search-a-licious,
-  which is a separate service/host — see D5 Major 2), legacy `/cgi/search.pl` last-resort
-  fallback; **descriptive `User-Agent`**; 429/backoff) + migration creating the **`foods`
-  cache table (surrogate UUID `id` PK, `code` UNIQUE)** and **adding the FK constraint
-  `recipe_ingredients.food_id → foods.id`** onto the column that already exists from T1.2
-  (no new column) + `GET /api/foods/search?q=` (**local `foods` first, live OFF only when
-  insufficient**, then
-  persist picked results) + the per-100 g nutrient mapping (`energy-kcal_100g`, else
-  `energy_100g ÷ 4.184`; proteins/carbohydrates/fat `_100g`) + a **unit→gram converter with
-  the density table AND the M2 piece-weight / spoon-volume table**. **First confirm the
-  current OFF rate limits against the live docs (M1)** — do not hard-code the old
-  "~100/min" figure — and size backoff conservatively. *Verify:* unit test with the **fake
-  `IHttpClient`** returns candidates; **resolving an already-picked food (by
-  `food_id`/barcode) makes no API call** (cache hit); a **kJ-only mock** is converted (or
-  rejected), never summed raw; unit-conversion tests (g/kg/ml/l + **piece units like
-  `Knoblauchzehen`/`Zwiebel` and spoons `TL`/`EL`**) incl. the "no table entry, no density
-  → flagged" path.
-- **T4.2** Macro engine: for ingredients with a picked `foodId`, sum `quantity × per-100 g`
-  → totals → per-serving + per-100 g. Ingredients with **no pick**, a product **missing
-  `*_100g` nutriments**, or an **unresolvable unit** are surfaced to the UI (never zeroed),
-  and any of them makes `totalWeightG` partial → per-100 g renders **"—"**. **Sets
-  `macrosEstimated: true` whenever a piece/spoon-table (or serving_size) weight fed the math**
-  (2nd-review Major 1), so the UI can mark those macros estimated rather than exact. *Verify:*
-  (a) an **all-exact-grams** recipe computes per-serving + per-100 g against **hand-computed
-  expected values** (not the converter's own constants — avoids the tautology the earlier
-  ±5% test had) with `macrosEstimated:false`; (b) a **piece/spoon** recipe computes a full
-  `totalWeightG` **and sets `macrosEstimated:true`**; (c) a recipe with an unpicked/flagged
-  ingredient reports it and shows per-100 g as "—".
-- **T4.2b** `POST /api/macros/compute` (sets **`macroSource: "ingredients"`** on a compute —
-  4th-review minor, so the T2.1 badge is reliable) + the frontend **search-and-pick UI** (per
-  ingredient: search box → candidate list — **preferring products with complete nutriments
-  / a nutrition grade** — → pick → macros fill; wired into the M2 form). *Verify:* in the
-  form, searching an ingredient (mocked/live OFF) lists candidates, picking one fills its
-  macros, per-serving + per-100 g compute correctly when all ingredients are picked and
-  gram-resolved, **and the result carries `macroSource:"ingredients"`** (backend compute unit
-  test + a form component test for the pick flow).
-- **T4.3** `POST /api/macros/estimate` + "Estimate with local LLM" button →
-  `LlmMacroEstimator` (reuses `LlmClient` on the **`IHttpClient` seam**; schema-validated;
-  also returns estimated total weight), fills macro fields for user review **and sets
-  `macroSource: "llm"` + `macrosEstimated: true`** (LLM output is an estimate — 3rd-review
-  Major; 4th-review minor: it must set `macroSource` so the T2.1 badge is reliable). *Verify:*
-  unit test with the **fake `IHttpClient`** (no live LLM) fills macro fields **and asserts the
-  filled recipe carries `macroSource:"llm"` + `macrosEstimated: true`**; the user can still
-  override before save (which flips `macroSource` → `manual`).
+## Milestone 4 — Makros aus Open Food Facts (Suche & Auswahl) + LLM-Schätzung
+- **T4.1** `NutritionSource`-Interface + **OFF-Client** (auf dem **`IHttpClient`-Seam**
+  aus D3/B2 — die echte Impl ist der T0.8-`httpclient`, **HTTPS mit Cert-Verifikation** zum
+  öffentlichen OFF-Host → **OFF-API-v2-Suche `/api/v2/search`** primär (**nicht**
+  Search-a-licious, das ein separater Service/Host ist — siehe D5 Major 2), das alte
+  `/cgi/search.pl` als Last-Resort-Fallback; **beschreibender `User-Agent`**; 429/Backoff) +
+  Migration, die die **`foods`-Cache-Tabelle (Surrogat-UUID-`id`-PK, `code` UNIQUE)** erstellt
+  und **das FK-Constraint `recipe_ingredients.food_id → foods.id`** auf der schon aus T1.2
+  existierenden Spalte ergänzt (keine neue Spalte) + `GET /api/foods/search?q=` (**erst lokale
+  `foods`, live OFF nur wenn unzureichend**, dann gewählte Ergebnisse persistieren) + das
+  per-100-g-Nährstoff-Mapping (`energy-kcal_100g`, sonst `energy_100g ÷ 4.184`;
+  proteins/carbohydrates/fat `_100g`) + ein **Einheit→Gramm-Converter mit der Dichte-Tabelle
+  UND der M2-Stück-Gewichts-/Löffel-Volumen-Tabelle**. **Zuerst die aktuellen OFF-Rate-Limits
+  gegen die Live-Docs bestätigen (M1)** — die alte „~100/min"-Zahl nicht hart codieren — und den
+  Backoff konservativ dimensionieren. *Verify:* Unit-Test mit dem **Fake-`IHttpClient`** liefert
+  Kandidaten; **das Auflösen eines schon gewählten Lebensmittels (per `food_id`/Barcode) macht
+  keinen API-Call** (Cache-Hit); ein **kJ-only-Mock** wird umgerechnet (oder abgewiesen), nie
+  roh summiert; Einheiten-Umrechnungs-Tests (g/kg/ml/l + **Stück-Einheiten wie
+  `Knoblauchzehen`/`Zwiebel` und Löffel `TL`/`EL`**) inkl. des „kein Tabellen-Eintrag, keine
+  Dichte → geflaggt"-Pfads.
+- **T4.2** Makro-Engine: für Zutaten mit einem gewählten `foodId` `quantity × per-100 g`
+  summieren → Totale → pro Portion + per 100 g. Zutaten mit **keinem Pick**, ein Produkt **ohne
+  `*_100g`-Nährwerte** oder eine **unauflösbare Einheit** werden der UI sichtbar gemacht (nie
+  genullt), und jede davon macht `totalWeightG` partiell → per 100 g rendert **„—"**. **Setzt
+  `macrosEstimated: true`, sobald ein Stück/Löffel-Tabellen- (oder serving_size-)Gewicht in die
+  Rechnung floss** (2nd-review Major 1), damit die UI diese Makros als geschätzt statt exakt
+  markieren kann. *Verify:* (a) ein **all-exact-grams**-Rezept berechnet pro Portion + per 100 g
+  gegen **handgerechnete Erwartungswerte** (nicht die eigenen Konstanten des Converters —
+  vermeidet die Tautologie des früheren ±5%-Tests) mit `macrosEstimated:false`; (b) ein
+  **Stück/Löffel**-Rezept berechnet ein volles `totalWeightG` **und setzt
+  `macrosEstimated:true`**; (c) ein Rezept mit einer ungepickten/geflaggten Zutat meldet sie und
+  zeigt per 100 g als „—".
+- **T4.2b** `POST /api/macros/compute` (setzt **`macroSource: "ingredients"`** bei einem
+  Compute — 4th-review minor, damit das T2.1-Badge zuverlässig ist) + die
+  Frontend-**Suche-und-Auswahl-UI** (pro Zutat: Suchbox → Kandidatenliste — **Produkte mit
+  vollständigen Nährwerten / einem Nutrition-Grade bevorzugend** — → Auswahl → Makros füllen;
+  ins M2-Formular verdrahtet). *Verify:* im Formular listet die Suche nach einer Zutat
+  (gemockt/live OFF) Kandidaten, eine Auswahl füllt ihre Makros, pro Portion + per 100 g rechnen
+  korrekt, wenn alle Zutaten gewählt und gramm-aufgelöst sind, **und das Ergebnis trägt
+  `macroSource:"ingredients"`** (Backend-Compute-Unit-Test + ein Formular-Component-Test für den
+  Pick-Flow).
+- **T4.3** `POST /api/macros/estimate` + „Estimate with local LLM"-Button →
+  `LlmMacroEstimator` (nutzt `LlmClient` auf dem **`IHttpClient`-Seam** wieder; schema-validiert;
+  liefert auch ein geschätztes Gesamtgewicht), füllt Makro-Felder zur Nutzer-Prüfung **und setzt
+  `macroSource: "llm"` + `macrosEstimated: true`** (LLM-Ausgabe ist eine Schätzung — 3rd-review
+  Major; 4th-review minor: es muss `macroSource` setzen, damit das T2.1-Badge zuverlässig ist).
+  *Verify:* Unit-Test mit dem **Fake-`IHttpClient`** (kein Live-LLM) füllt Makro-Felder **und
+  prüft, dass das gefüllte Rezept `macroSource:"llm"` + `macrosEstimated: true` trägt**; der
+  Nutzer kann vor dem Speichern noch überschreiben (was `macroSource` → `manual` kippt).
 
-## Milestone 5 — Media, polish, search
-- **T5.1** Image upload endpoint — **this task adds a `multipart/form-data` parser into the
-  `net` lib** (deferred from M0, first needed here) → disk volume + external-URL option
-  (**store-only, no server-side fetch — M6b/SSRF**). Concrete validation per D6/M6:
-  **server-generated filename** (UUID + extension, client filename ignored — no path
-  traversal), **size ≤ 8 MB enforced *during* streaming** (reject as the bytes arrive, not
-  after buffering the whole part — else a large upload OOMs before the check; 5th-review minor,
-  mirroring the T0.2 body cap), **content-type ∈ {jpeg,png,webp} verified by magic bytes**.
-  **Files are lifecycle-managed (3rd-review minor #6):** the uploads service **owns** the
-  UUID-named files it wrote and unlinks any owned file no longer referenced by a
-  `recipe_images` row — on recipe delete and on the PUT image diff (per the T1.3 ordering);
-  external-URL images own no file. *Verify:* uploading a valid image attaches it and renders;
-  **oversized, wrong-type, and a crafted path-traversal filename are all rejected**; an
-  external image URL is stored and **never fetched by the backend** (API test asserts no
-  outbound request); **deleting a recipe (and replacing an image via PUT) removes the
-  corresponding owned file from the uploads volume, and an external-URL image is never
-  touched**.
-- **T5.2** Browse **search/filter/sort** via `GET /api/recipes` query params + SQL
-  (locked at GATE 0), layered onto the **paginated summary list** (`limit`/`offset`, D1):
-  **title text** search — **plain case-insensitivity** via **`ILIKE` under a UTF-8
-  `lc_ctype`** (`Ä`↔`ä`, `Huhn`↔`huhn`); **no accent-folding** (`Hahnchen`↔`Hähnchen` are NOT
-  equal) and **no extension** — needs no pinned PG version (4th-review Major #6; decided
-  case-insensitive-only. `citext` is explicitly rejected — it only `lower()`-folds, does not
-  strip accents; accent-folding via `unaccent` is a deferred later option). **`ILIKE`'s `Ä`↔`ä`
-  folding depends on a UTF-8 DB locale (not C/POSIX) — the Postgres container is initialized
-  with one (T6.1); 5th-review minor.** Substring on `title`, optionally `description`; **tag filter** (multi-select, **AND** semantics); a
-  **favorites-only** toggle (`favorite = true`); **macro filters** `minProtein` + `maxCalories`
-  on the per-serving macro columns; and **sort** by newest (`createdAt` desc, default), title
-  A–Z, or highest protein. _(Full-text search over ingredients/steps is deferred to a later
-  phase — needs Postgres FTS.)_ *Verify:* search tests return the expected subset from seeded
-  data for a title query (**a case-insensitivity case, `Ä`↔`ä`; and a control asserting accent
-  folding is NOT applied**), a tag AND-filter,
-  the favorites toggle, and a `minProtein`/`maxCalories` range; confirm each sort order **and
-  that `limit`/`offset` paginate — and that a `limit` above the max is clamped, not honored
-  verbatim** (3rd-review minor #5).
+## Milestone 5 — Medien, Politur, Suche
+- **T5.1** Bild-Upload-Endpoint — **diese Task ergänzt einen
+  `multipart/form-data`-Parser in die `net`-Lib** (aus M0 verschoben, hier zuerst gebraucht) →
+  Disk-Volume + externe-URL-Option (**nur-speichern, kein serverseitiger Fetch — M6b/SSRF**).
+  Konkrete Validierung gemäß D6/M6: **server-generierter Dateiname** (UUID + Extension,
+  Client-Dateiname ignoriert — kein Path-Traversal), **Größe ≤ 8 MB *während* des Streamings
+  erzwungen** (abweisen, wenn die Bytes ankommen, nicht nach dem Puffern des ganzen Parts —
+  sonst OOMt ein großer Upload vor dem Check; 5th-review minor, spiegelt den T0.2-Body-Cap),
+  **Content-Type ∈ {jpeg,png,webp} per Magic-Bytes verifiziert**. **Dateien sind
+  lifecycle-verwaltet (3rd-review minor #6):** der Uploads-Service **besitzt** die
+  UUID-benannten Dateien, die er geschrieben hat, und unlinkt jede eigene Datei, die keine
+  `recipe_images`-Zeile mehr referenziert — bei Rezept-Löschung und beim PUT-Bild-Diff (gemäß
+  der T1.3-Reihenfolge); externe-URL-Bilder besitzen keine Datei. *Verify:* ein valides Bild
+  hochladen hängt es an und rendert; **übergroß, falscher Typ und ein gebauter
+  Path-Traversal-Dateiname werden alle abgewiesen**; eine externe Bild-URL wird gespeichert und
+  **nie vom Backend gefetcht** (API-Test prüft, dass kein ausgehender Request erfolgt); **das
+  Löschen eines Rezepts (und das Ersetzen eines Bildes via PUT) entfernt die entsprechende
+  eigene Datei vom Uploads-Volume, und ein externe-URL-Bild wird nie angefasst**.
+- **T5.2** Browse-**Suche/Filter/Sort** über `GET /api/recipes`-Query-Params + SQL (bei
+  GATE 0 festgelegt), auf die **paginierte Summary-Liste** gelegt (`limit`/`offset`, D1):
+  **Titel-Text**-Suche — **einfache Case-Insensitivity** via **`ILIKE` unter einem
+  UTF-8-`lc_ctype`** (`Ä`↔`ä`, `Huhn`↔`huhn`); **keine Accent-Faltung** (`Hahnchen`↔`Hähnchen`
+  sind NICHT gleich) und **keine Extension** — braucht keine gepinnte PG-Version (4th-review
+  Major #6; entschieden case-insensitive-only. `citext` wird ausdrücklich abgelehnt — es
+  `lower()`-faltet nur, strippt keine Accents; Accent-Faltung via `unaccent` ist eine verschobene
+  spätere Option). **`ILIKE`s `Ä`↔`ä`-Faltung hängt von einem UTF-8-DB-Locale ab (nicht
+  C/POSIX) — der Postgres-Container wird mit einem initialisiert (T6.1); 5th-review minor.**
+  Substring auf `title`, optional `description`; **Tag-Filter** (Multi-Select, **AND**-Semantik);
+  ein **Nur-Favoriten**-Toggle (`favorite = true`); **Makro-Filter** `minProtein` + `maxCalories`
+  auf den Makro-Spalten pro Portion; und **Sort** nach neueste (`createdAt` desc, Default), Titel
+  A–Z oder höchstes Protein. _(Volltextsuche über Zutaten/Steps ist auf eine spätere Phase
+  verschoben — braucht Postgres-FTS.)_ *Verify:* Such-Tests liefern die erwartete Teilmenge aus
+  geseedeten Daten für eine Titel-Query (**ein Case-Insensitivity-Fall, `Ä`↔`ä`; und eine
+  Kontrolle, die prüft, dass Accent-Faltung NICHT angewandt wird**), einen Tag-AND-Filter, den
+  Favoriten-Toggle und eine `minProtein`/`maxCalories`-Range; jede Sort-Reihenfolge bestätigen
+  **und dass `limit`/`offset` paginieren — und dass ein `limit` über dem Max geklammert wird,
+  nicht wörtlich übernommen** (3rd-review minor #5).
 
-## Milestone 6 — Deployment & docs
-- **T6.1** Multi-stage **Dockerfile** for the C++ backend (build → slim runtime), on a
-  **digest-pinned base image (`FROM …@sha256:…`, not a mutable tag — 5th-review T1)**; the
-  **Postgres service is initialized with a UTF-8 locale** (`POSTGRES_INITDB_ARGS=--locale`/
-  `LANG=…utf8`) so the T5.2 `ILIKE` `Ä`↔`ä` folding is guaranteed, not left to the default
-  (5th-review minor); the build stage does **`apt install` of
-  `libpq-dev`/`libssl-dev`/`libutf8proc-dev`/`catch2`**
-  (prebuilt, fast). The **slim runtime image MUST include the runtime libs (`libpq5`,
-  `libssl`, `libutf8proc`) and `ca-certificates`** — our own OpenSSL HTTPS client (T0.8)
-  verifies the OFF cert against the system trust store, so without CA certs (or the runtime
-  libs) the OFF path fails at deploy even though it passed in dev. + Angular `ng build` static
-  bundle served by nginx with a **`location /api/ { proxy_pass → backend }`** block, a
-  **`location /uploads/`** block, **and a `location /health` (or expose `/api/health`)** so the
-  T6.2 smoke test is reachable (4th-review Major #5 — nginx is the only public surface; a bare
-  `/health` would 404) + `docker-compose.yml` (backend, frontend, postgres volume, **and a
-  named `uploads` volume mounted into BOTH the backend (writes) and frontend/nginx (serves)
-  containers** — 4th-review Major #4: without a shared volume nginx 404s backend-written files
-  and uploads are lost on recreate; `LLM_BASE_URL` → external Ollama) + `.env.example`.
-  *Verify:* `docker compose up` builds and serves the app; browse works against a persisted
-  Postgres volume; `/api/*`, `/uploads/*`, and **`/health`** are reachable through nginx; **an
-  uploaded image written by the backend is served by nginx** (shared volume works); **an OFF
-  search from inside the running backend container succeeds (CA trust works)**.
-- **T6.2** `docs/` usage + config (env vars, pointing at Ollama, Postgres backup, C++
-  build notes **incl. the exact `apt install` package list (libpq, OpenSSL, utf8proc, Catch2)
-  — using the pinned base image's real, version-specific package names** (e.g. `libssl3`, the
-  release's `libutf8proc`/Catch2 packages), not the generic placeholders — and the
-  **digest-pinned base image** (T1), Angular build notes, **and the minimum build RAM** — Q8).
-  Note that **the multi-stage Dockerfile build is the source of truth for the shipped artifact**
-  — WSL dev only affects "works in dev, breaks in the image" surprises (5th-review minor).
-  **Verify the exact Ollama pull tag** for the documented `LLM_MODEL` (`ollama list`) and put a
-  resolvable tag in `.env.example`. *Verify:* a **concrete copy-pasteable sequence** from the
-  docs succeeds: `docker compose up` → `curl …/health` returns 200 → `POST` a sample recipe →
-  it appears in `GET /api/recipes`.
+## Milestone 6 — Deployment & Docs
+- **T6.1** Mehrstufiges **Dockerfile** fürs C++-Backend (Build → schlankes Runtime), auf
+  einer **per-Digest gepinnten Base (`FROM …@sha256:…`, nicht ein veränderlicher Tag —
+  5th-review T1)**; der **Postgres-Dienst wird mit einem UTF-8-Locale initialisiert**
+  (`POSTGRES_INITDB_ARGS=--locale`/`LANG=…utf8`), damit die T5.2-`ILIKE`-`Ä`↔`ä`-Faltung
+  garantiert ist, nicht dem Default überlassen (5th-review minor); die Build-Stufe macht
+  **`apt install` von `libpq-dev`/`libssl-dev`/`libutf8proc-dev`/`catch2`** (vorgebaut,
+  schnell). Das **schlanke Runtime-Image MUSS die Runtime-Libs (`libpq5`, `libssl`,
+  `libutf8proc`) und `ca-certificates` enthalten** — unser eigener OpenSSL-HTTPS-Client (T0.8)
+  verifiziert das OFF-Cert gegen den System-Trust-Store, also scheitert ohne CA-Certs (oder die
+  Runtime-Libs) der OFF-Pfad beim Deploy, obwohl er in dev bestand. + Angular-`ng
+  build`-Static-Bundle, von nginx ausgeliefert mit einem **`location /api/ { proxy_pass →
+  backend }`**-Block, einem **`location /uploads/`**-Block **und einem `location /health` (oder
+  `/api/health` exponieren)**, damit der T6.2-Smoke-Test erreichbar ist (4th-review Major #5 —
+  nginx ist die einzige öffentliche Fläche; ein bloßes `/health` würde 404en) +
+  `docker-compose.yml` (Backend, Frontend, Postgres-Volume **und ein benanntes
+  `uploads`-Volume, in BEIDE Container gemountet — Backend (schreibt) und Frontend/nginx
+  (liefert)** — 4th-review Major #4: ohne ein geteiltes Volume 404t nginx backend-geschriebene
+  Dateien und Uploads gehen bei Recreate verloren; `LLM_BASE_URL` → externes Ollama) +
+  `.env.example`. *Verify:* `docker compose up` baut und liefert die App aus; Browse funktioniert
+  gegen ein persistiertes Postgres-Volume; `/api/*`, `/uploads/*` und **`/health`** sind über
+  nginx erreichbar; **ein vom Backend geschriebenes hochgeladenes Bild wird von nginx
+  ausgeliefert** (geteiltes Volume funktioniert); **eine OFF-Suche aus dem laufenden
+  Backend-Container gelingt (CA-Trust funktioniert)**.
+- **T6.2** `docs/`-Nutzung + Config (Env-Vars, auf Ollama zeigen, Postgres-Backup,
+  C++-Build-Notizen **inkl. der exakten `apt install`-Paketliste (libpq, OpenSSL, utf8proc,
+  Catch2) — unter Nutzung der echten, versions-spezifischen Paketnamen des gepinnten
+  Base-Images** (z. B. `libssl3`, die `libutf8proc`/Catch2-Pakete des Releases), nicht der
+  generischen Platzhalter — und das **per-Digest gepinnte Base-Image** (T1),
+  Angular-Build-Notizen **und der minimale Build-RAM** — Q8). Beachten, dass **der mehrstufige
+  Dockerfile-Build die Source of Truth fürs ausgelieferte Artefakt ist** — WSL-dev betrifft nur
+  „läuft in dev, bricht im Image"-Überraschungen (5th-review minor). **Den exakten
+  Ollama-Pull-Tag verifizieren** für das dokumentierte `LLM_MODEL` (`ollama list`) und einen
+  auflösbaren Tag in `.env.example` legen. *Verify:* eine **konkrete copy-paste-bare Sequenz**
+  aus den Docs gelingt: `docker compose up` → `curl …/health` liefert 200 → ein Beispiel-Rezept
+  `POST`en → es erscheint in `GET /api/recipes`.
 
 ---
 
-## Open questions for the human (GATE 0)
-_Resolved this session (all locked): `Recipe` field list; browse/search scope (T5.2);
-paste-parser depth + source scope (D4 — social captions only); LLM model policy +
-no-translation (D3); milestone order (deploy stays M6); **per-100 g gap (M2) → add a
-piece-weight/spoon-volume table so it resolves for real recipes**. Remaining sign-off
-questions:_
-1. **Auth seam default:** OK to include the auth-ready schema (users stub + nullable
-   `owner_id`) now with **no auth implemented**, per D2/D6? **→ APPROVED 2026-08-24: yes.**
-2. **Scope:** all **SEVEN milestones (M0 core libraries + M1–M6)** this phase? _(5th-review
-   P2.)_ **→ APPROVED 2026-08-24: yes, all seven.**
-3. **Freeze D1?** _(5th-review P4.)_ **→ APPROVED 2026-08-24: yes, D1 is FROZEN** — no further
-   framework / package-manager / from-scratch-scope pivots. The **TLS client stays hand-rolled
-   over OpenSSL** (with the T0.8 S1 hostname-verify fix); the `IHttpClient` seam keeps a
-   library swap cheap if ever needed.
-_All three sign-off questions are ANSWERED; GATE 0 is CLOSED (`status: approved`)._
+## Offene Fragen an den Menschen (GATE 0)
+_Diese Session gelöst (alle festgelegt): `Recipe`-Feldliste; Browse-/Such-Scope (T5.2);
+Paste-Parser-Tiefe + Quell-Scope (D4 — nur Social-Captions); LLM-Modell-Politik +
+keine-Übersetzung (D3); Milestone-Reihenfolge (Deploy bleibt M6); **per-100-g-Lücke (M2) →
+eine Stück-Gewichts-/Löffel-Volumen-Tabelle ergänzen, damit sie für echte Rezepte auflöst**.
+Verbleibende Sign-off-Fragen:_
+1. **Auth-Seam-Default:** OK, das auth-ready Schema (users-Stub + nullable `owner_id`) jetzt
+   mit **noch nicht implementierter Auth** aufzunehmen, gemäß D2/D6? **→ APPROVED 2026-08-24:
+   ja.**
+2. **Scope:** alle **sieben Milestones (M0 Core-Bibliotheken + M1–M6)** in dieser Phase?
+   _(5th-review P2.)_ **→ APPROVED 2026-08-24: ja, alle sieben.**
+3. **D1 einfrieren?** _(5th-review P4.)_ **→ APPROVED 2026-08-24: ja, D1 ist EINGEFROREN** —
+   keine weiteren Framework-/Package-Manager-/From-scratch-Scope-Wenden. Der **TLS-Client
+   bleibt von Hand über OpenSSL** (mit dem T0.8-S1-Hostname-Verify-Fix); der
+   `IHttpClient`-Seam hält einen Library-Tausch günstig, falls je nötig.
+_Alle drei Sign-off-Fragen sind BEANTWORTET; GATE 0 ist GESCHLOSSEN (`status: approved`)._
 
-_Stack: Angular SPA + **from-scratch C++ backend (no framework — own HTTP server/router/JSON/
-schema/DB-over-libpq/HTTP-client; externals = libpq, OpenSSL, Catch2)** + PostgreSQL._
+_Stack: Angular-SPA + **C++-Backend from scratch (kein Framework — eigener HTTP-Server/Router/
+JSON/Schema/DB-über-libpq/HTTP-Client; Externals = libpq, OpenSSL, Catch2)** + PostgreSQL._
 
 ## Reviewer notes
 _(newest round first)_

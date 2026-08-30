@@ -1,111 +1,237 @@
 # mise-en-place — Roadmap
 
-A human-readable, checkable progress tracker. The **spec** is
-`docs/plans/PLAN_recipe_app_foundation.md`; this is the **progress view** — tick a box when a
-step is done and verified.
+Der Fortschritts-Blick auf das Projekt: eine Liste zum Abhaken. Die Spezifikation
+ist der [Plan](plans/PLAN_recipe_app_foundation.md) — dort steht zu jeder Aufgabe
+das vollständige `Verify`. Hier haken wir ab, was fertig und geprüft ist.
 
-**How to use:** `[ ]` = not started · `[~]` = in progress · `[x]` = done & verified.
-A task is **done** only when its code is written, its **"Done when"** check passes, and the
-change is committed. Milestones close after a `workflow:review` at the boundary.
+**Legende:** `[ ]` = offen · `[~]` = in Arbeit · `[x]` = fertig und geprüft.
+Eine Aufgabe ist **fertig**, wenn ihr Code geschrieben ist, ihr „Fertig, wenn"
+erfüllt ist und die Änderung committet ist. Ein Milestone schließt nach dem
+Review an seiner Grenze.
 
-**Status (2026-08-24):** ✅ **GATE 0 PASSED** — plan **approved** (`approvals.reviewer` +
-`approvals.human` both `2026-08-24`, `status: approved`). Human decisions: auth-ready-no-auth;
-**seven milestones**; **D1 frozen** (no more stack pivots); TLS stays hand-rolled + the S1
-fix. Five external reviews + the internal reviewer folded in. **Ready to start implementation
-at Milestone 0 / T0.1.**
-
-> Stack (FROZEN): **from-scratch C++ backend** (own HTTP server/router/JSON/schema/
-> DB-over-libpq/HTTP-client), Angular SPA, PostgreSQL; externals via **system apt** (libpq,
-> OpenSSL, utf8proc, Catch2 — **no vcpkg**); dev in **WSL2**.
+**Stand:** GATE 0 ist bestanden — der Plan ist freigegeben (die Approval-Daten
+stehen im Frontmatter des Plans). Nächster Schritt ist die Implementierung bei
+Milestone 0, Aufgabe T0.1. Der Stack ist eingefroren (D1); die maßgebliche
+Beschreibung steht im [Plan](plans/PLAN_recipe_app_foundation.md).
 
 ---
 
-## Phase 0 — Planning ✅ (GATE 0 passed 2026-08-24)
+## Phase 0 — Planung (abgeschlossen)
 
-- [x] Understand — intent + repo context
-- [x] Plan written — `docs/plans/PLAN_recipe_app_foundation.md`
-- [x] Recipe format + product scope locked
-- [x] **Five external reviews** folded in (`docs/reviews/`) — incl. the from-scratch pivot,
-      the vcpkg drop, and the M0-security pass
-- [x] Reviewer approval (`approvals.reviewer: 2026-08-24`)
-- [x] **Human GATE 0 signature** (`approvals.human: 2026-08-24`) — auth-ready-no-auth · seven
-      milestones · D1 frozen · TLS hand-rolled + S1 fix · TLS/basic-auth caveat accepted
-
----
-
-## Milestone 0 — Core backend libraries (from scratch) ⚪
-
-- [ ] **T0.1 — Toolchain + skeleton** — plain **GNU Makefile** (C++20) finding apt `libpq-dev`/`libssl-dev`/`libutf8proc-dev`/`catch2` via `pkg-config` (Linux-only build → Make over CMake); `/lib` (`net router json jsonschema db httpclient`) + `/app` + `/tests`; **ASAN+UBSAN (+TSan) build** (`make asan`; TSan for the T0.9 + T0.6 pools); dev `docker-compose` Postgres. WSL2. **Done when:** `make` builds; a Catch2 test runs green under ASAN+UBSAN; the dev Postgres comes up.
-- [ ] **T0.2 — `net` (HTTP/1.1 server, single-threaded)** — socket listener, request parser (CL + chunked), response writer, keep-alive (**single-threaded — thread pool deferred to T0.9**); hardening: size caps, timeout (anti-slowloris), **anti-smuggling framing** (CL+TE, dup CL, bare CR/LF/NUL, overflow); **fuzz harness**. **Done when:** malformed/smuggling vectors → 400; oversized/chunked-over-cap rejected not OOM'd; stalled conn times out; fuzzer clean for a budget.
-- [ ] **T0.3 — `router`** — method+path (`:id` params) → handler; 404/405; error + warning envelope helpers. **Done when:** routing/param/404/405 tests + envelope-shaped error body pass.
-- [ ] **T0.4 — `json`** — own parser+serializer (unicode escapes incl. **surrogate pairs**, numbers, bool/null), **recursion-depth cap**; **fuzz harness**. **Done when:** round-trips (incl. surrogate pairs) pass; malformed → clean error; past-cap depth rejected; fuzzer clean.
-- [ ] **T0.5 — `jsonschema`** — own validator for the authored subset (types/enum/required/arrays/**`type:[…,"null"]` union**/`$ref`), reports the failing path; tested against a **generic fixture schema** (real Recipe schema is T1.2). **Done when:** valid fixture accepted; each violation class (+ null in non-nullable) rejected with path; null accepted in a nullable field.
-- [ ] **T0.6 — `db` (libpq)** — connection pool, **parameterized `exec`**, result→row mapping, transaction helper, standalone `connect()` for the migration lock, and a **migration-only raw `PQexec`** path. **Done when:** parameterized round-trip; SQL-metachar bind stored literally; pool concurrency; standalone connect works.
-- [ ] **T0.7 — App wiring + `/health`** — `main()` starts server, mounts router, builds db pool from env, logging + config. **Done when:** app boots; `GET /health` → 200 through our server; DB connect logged.
-- [ ] **T0.8 — `httpclient`** — own HTTP/1.1 client; chunked decode; body cap; **HTTPS via OpenSSL with HOSTNAME verification (`SSL_set1_host` + `X509_V_OK`)** for OFF, plain HTTP for Ollama; timeouts. **Done when (real network):** HTTPS GET verified; **valid-CA-wrong-hostname rejected**; plain-HTTP local GET; chunked decode; fake stays the unit double.
-- [ ] **T0.9 — `net` concurrency (thread pool, built LAST)** — fixed-size worker pool; accept loop dispatches each connection to a worker that owns one `db` (T0.6) connection per request; bounded queue; clean drain/join shutdown; **built + tested under TSan**. **Done when:** concurrent keep-alive clients handled with no interleaved/corrupted responses; TSan clean under load; queue bounded; clean shutdown, ASAN clean.
-- [ ] **🚦 M0 review** — boundary review passes _(largest + most security-exposed part — read carefully)._
+- [x] Verstehen — Intent und Repo-Kontext
+- [x] Plan geschrieben — [`plans/PLAN_recipe_app_foundation.md`](plans/PLAN_recipe_app_foundation.md)
+- [x] Rezeptformat und Produkt-Scope festgelegt
+- [x] Fünf externe Reviews eingearbeitet ([`reviews/`](reviews/)) — inkl. der
+      From-scratch-Wende, dem vcpkg-Verzicht und dem M0-Security-Durchgang
+- [x] Reviewer-Freigabe (siehe Plan-Frontmatter)
+- [x] Menschliche GATE-0-Freigabe (siehe Plan-Frontmatter) — auth-ready ohne
+      Auth, sieben Milestones, D1 eingefroren, TLS von Hand über OpenSSL plus
+      der S1-Hostname-Fix
 
 ---
 
-## Milestone 1 — Schema, DB, browse API (on the M0 libs) ⚪
+## Milestone 0 — Core-Backend-Bibliotheken (from scratch)
 
-- [ ] **T1.1 — Migration runner** — `schema_migrations`, per-migration transaction, session advisory lock on the dedicated connection. **Done when:** applies on boot; no re-apply; a failing migration rolls back cleanly.
-- [ ] **T1.2 — `Recipe` schema + migrations + model round-trip** — authored schema (+ `definitions/Macros`); relational tables (child tables + `recipe_tags`, `ON DELETE CASCADE`, `macros_estimated` col); own JSON assembly + validator. **Done when:** migrations apply; round-trip covers grouped/to-taste/ordered+empty steps/tags+images order/`macrosEstimated`; validator rejects invalid.
-- [ ] **T1.3 — Repository/service (CRUD) + PUT full-replace** — food_id picks survive; `macrosEstimated` recompute except when `macroSource=manual`; image-file GC ordering. **Done when:** CRUD + PUT-preserves-picks + per-100g null-path integration tests pass.
-- [ ] **T1.4 — Browse controllers + seed** — `GET /api/recipes` (paginated summary) + `/:id` (full); seed with `food_id` null. **Done when:** list honors limit/offset; `/:id` returns schema-valid full Recipe.
-- [ ] **🚦 M1 review**
+- [ ] **T0.1 — Toolchain + Skeleton** — GNU Makefile (C++20), das die apt-Libs
+      `libpq-dev`/`libssl-dev`/`libutf8proc-dev`/`catch2` über `pkg-config`
+      findet (Linux-only Build → Make statt CMake); Layout `/lib`
+      (`net router json jsonschema db httpclient`) + `/app` + `/tests`;
+      ASAN+UBSAN-Build (`make asan`, TSan für die Pools aus T0.9 und T0.6); dev
+      `docker-compose` Postgres. WSL2.
+      **Fertig, wenn:** `make` baut; ein Catch2-Test läuft grün unter
+      ASAN+UBSAN; die dev-Postgres kommt hoch.
+- [ ] **T0.2 — `net` (HTTP/1.1-Server, single-threaded)** — Socket-Listener,
+      Request-Parser (`Content-Length` und chunked), Response-Writer, keep-alive
+      (single-threaded — der thread pool folgt in T0.9); Härtung: Size-Caps,
+      Timeout (Anti-Slowloris), Anti-Smuggling-Framing (CL+TE, doppeltes CL,
+      bare CR/LF/NUL, Overflow); Fuzz-Harness.
+      **Fertig, wenn:** malformte und Smuggling-Vektoren → 400; übergroß oder
+      chunked über Cap wird abgewiesen statt OOM; eine stehende Verbindung läuft
+      in den Timeout; der Fuzzer bleibt sauber über ein Budget.
+- [ ] **T0.3 — `router`** — Method + Path (`:id`-Params) → Handler; 404/405;
+      Error- und Warning-Envelope-Helfer.
+      **Fertig, wenn:** Routing-, Param-, 404- und 405-Tests plus ein
+      envelope-förmiger Error-Body bestehen.
+- [ ] **T0.4 — `json`** — eigener Parser + Serializer (Unicode-Escapes inkl.
+      Surrogate-Pairs, Zahlen, bool/null), Rekursionstiefen-Cap; Fuzz-Harness.
+      **Fertig, wenn:** Round-Trips (inkl. Surrogate-Pairs) bestehen; malformt →
+      sauberer Fehler; Tiefe über dem Cap wird abgewiesen; der Fuzzer bleibt
+      sauber.
+- [ ] **T0.5 — `jsonschema`** — eigener Validator für die authored subset
+      (types/enum/required/arrays/`type:[…,"null"]`-Union/`$ref`), meldet den
+      fehlerhaften Pfad; getestet gegen ein generisches Fixture-Schema (das echte
+      Recipe-Schema kommt in T1.2).
+      **Fertig, wenn:** valides Fixture akzeptiert; jede Verletzungsklasse (plus
+      null in einem non-nullable Feld) mit Pfad abgewiesen; null in einem
+      nullable Feld akzeptiert.
+- [ ] **T0.6 — `db` (libpq)** — Connection-Pool, parametrisiertes `exec`,
+      Result→Row-Mapping, Transaktions-Helfer, standalone `connect()` für den
+      Migration-Lock, ein migration-only `PQexec`-Pfad.
+      **Fertig, wenn:** parametrisierter Round-Trip; ein SQL-Metazeichen als bind
+      wird literal gespeichert; Pool-Nebenläufigkeit; standalone connect
+      funktioniert.
+- [ ] **T0.7 — App-Wiring + `/health`** — `main()` startet den Server, mountet
+      den Router, baut den db-Pool aus env, Logging + Config.
+      **Fertig, wenn:** die App bootet; `GET /health` → 200 durch den eigenen
+      Server; der DB-Connect wird geloggt.
+- [ ] **T0.8 — `httpclient`** — eigener HTTP/1.1-Client; chunked decode;
+      Body-Cap; HTTPS über OpenSSL mit HOSTNAME-Verifikation (`SSL_set1_host` +
+      `X509_V_OK`) für OFF, plain HTTP für Ollama; Timeouts.
+      **Fertig, wenn (echtes Netz):** HTTPS-GET verifiziert; valider CA bei
+      falschem Hostname wird abgewiesen; plain-HTTP-GET lokal; chunked decode;
+      der Fake bleibt das Unit-Double.
+- [ ] **T0.9 — `net`-Nebenläufigkeit (thread pool, zuletzt gebaut)** — fester
+      Worker-Pool; der Accept-Loop verteilt jede Verbindung an einen Worker, der
+      pro Request eine `db`-Connection (T0.6) besitzt; beschränkte Queue;
+      sauberes drain/join-Shutdown; unter TSan gebaut und getestet.
+      **Fertig, wenn:** nebenläufige keep-alive-Clients ohne verschränkte oder
+      korrupte Antworten; TSan sauber unter Last; die Queue ist beschränkt;
+      sauberes Shutdown, ASAN sauber.
+- [ ] **M0-Review** — der Review an der Milestone-Grenze besteht (der größte und
+      am stärksten sicherheitsexponierte Teil — sorgfältig lesen).
 
 ---
 
-## Milestone 2 — Frontend scaffold, browse/detail, structured form ⚪
+## Milestone 1 — Schema, DB, Browse-API (auf den M0-Libs)
 
-- [ ] **T2.0 — UI mockups** (`docs/mockups/`) — screens + states agreed before build.
-- [ ] **T2.1 — Angular scaffold + browse/detail** — exact-pinned Angular; dev proxy; typed API service on the error envelope; browse (paginated summaries) + detail (macros, `—`/estimated marker, `macroSource` badge, tags/favorite/notes/times, ingredient notes). **Done when:** `ng build`/`ng test` green; list+detail render a seeded recipe.
-- [ ] **T2.2 — Add/Edit form + DELETE** — Reactive Forms incl. **tags/favorite/notes/times** (the only way they're set); `POST`/`PUT /api/recipes/:id`; `DELETE …/:id`→204. **Done when:** save persists; tags+favorite round-trip and are found by T5.2 filters; 422 on invalid; PUT preserves picks; delete cascades.
-- [ ] **T2.3 — Manual macro entry + override.** **Done when:** manual macros persist + render; per-100g "—" with no weight.
-- [ ] **🚦 M2 review** _(M1+M2 = first end-to-end vertical slice)_
-
----
-
-## Milestone 3 — Paste import with selectable engine ⚪
-
-- [ ] **T3.1 — `RuleBasedParser` + `POST /api/parse`** — social captions; **utf8proc NFC** then own UTF-8 scanning; sections/qty-unit/macro block/to-taste/parenthetical→note; **`/api/parse` returns a partial draft, never 422**. **Done when:** 3 fixtures parse (grouping, null-qty, macro block, empty steps, umlaut/NFD, `7%` trap); partial caption → draft+warning.
-- [ ] **T3.2 — `LlmClient` + `LlmParser` (fallback)** — on `IHttpClient` (T0.8); Ollama native `/api/chat format=schema`; invalid → empty/partial draft + warning. **Done when:** fake-client test: valid accepted, malformed → documented fallback.
-- [ ] **T3.3 — Paste screen** — textarea + engine toggle → editable preview → save. **Done when:** rule-based paste yields a pre-filled saveable form.
-- [ ] **🚦 M3 review**
-
----
-
-## Milestone 4 — Macros from Open Food Facts + LLM estimate ⚪
-
-- [ ] **T4.1 — `NutritionSource` + OFF client + `foods` cache + converter** — OFF v2 `/api/v2/search` (verify limits) on T0.8 HTTPS; `foods` (UUID id PK, code UNIQUE) + FK add; local-first; per-100g mapping; unit→gram (density + piece/spoon tables). **Done when:** fake-client candidates; cache hit → no call; kJ-only converted/rejected; unit + piece/spoon conversions incl. flagged path.
-- [ ] **T4.2 — Macro engine** — sum → per-serving + per-100g; unpicked/flagged → "—"; sets `macrosEstimated` when piece/spoon fed it. **Done when:** exact-grams matches hand-computed (`estimated:false`); piece/spoon full weight (`estimated:true`); flagged → "—".
-- [ ] **T4.2b — `POST /api/macros/compute` + search-and-pick UI** — sets `macroSource:"ingredients"`. **Done when:** in-form search→pick→fill; compute correct + provenance set.
-- [ ] **T4.3 — `POST /api/macros/estimate` + LLM button** — sets `macroSource:"llm"` + `macrosEstimated:true`. **Done when:** fake-LLM fills + asserts provenance; user can override.
-- [ ] **🚦 M4 review**
+- [ ] **T1.1 — Migration-Runner** — `schema_migrations`, jede Migration in einer
+      eigenen Transaktion, Session-Advisory-Lock auf der dedizierten Connection.
+      **Fertig, wenn:** wendet beim Boot an; kein erneutes Anwenden; eine
+      fehlschlagende Migration rollt sauber zurück.
+- [ ] **T1.2 — `Recipe`-Schema + Migrationen + Model-Round-Trip** — das authored
+      Schema (+ `definitions/Macros`); relationale Tabellen (Kind-Tabellen +
+      `recipe_tags`, `ON DELETE CASCADE`, `macros_estimated`-Spalte); eigene
+      JSON-Zusammensetzung + Validator.
+      **Fertig, wenn:** Migrationen wenden an; der Round-Trip deckt
+      gruppierte/to-taste/geordnete-und-leere Steps, Tags- und Bild-Reihenfolge
+      und `macrosEstimated` ab; der Validator weist Invalides ab.
+- [ ] **T1.3 — Repository/Service (CRUD) + PUT-Full-Replace** — food_id-Picks
+      überleben; `macrosEstimated` wird neu berechnet, außer bei
+      `macroSource=manual`; Reihenfolge der Bild-Datei-GC.
+      **Fertig, wenn:** CRUD + PUT-erhält-Picks + Per-100g-Null-Pfad-Tests
+      bestehen.
+- [ ] **T1.4 — Browse-Controller + Seed** — `GET /api/recipes` (paginierte
+      Summary) + `/:id` (voll); Seed mit `food_id` null.
+      **Fertig, wenn:** die Liste respektiert limit/offset; `/:id` liefert ein
+      schema-valides volles Recipe.
+- [ ] **M1-Review**
 
 ---
 
-## Milestone 5 — Media, polish, search ⚪
+## Milestone 2 — Frontend-Scaffold, Browse/Detail, strukturiertes Formular
 
-- [ ] **T5.1 — Image upload + lifecycle** — adds a multipart parser into `net`; server-gen filename, ≤8 MB **enforced during streaming**, magic-byte type; external URL store-only (no SSRF); owned-file GC on delete/PUT. **Done when:** valid upload renders; oversized/wrong-type/traversal rejected; external never fetched; delete/PUT unlinks owned files.
-- [ ] **T5.2 — Search / filter / sort** — case-insensitive `ILIKE` (UTF-8 locale, no accent-fold, no extension); tag AND-filter; favorites; minProtein/maxCalories; sort; on the clamped paginated list. **Done when:** subset tests (incl. `Ä`↔`ä`, accent-fold-NOT-applied control), sorts, and limit-clamp pass.
-- [ ] **🚦 M5 review**
+- [ ] **T2.0 — UI-Mockups** ([`mockups/`](mockups/)) — Screens + States sind vor
+      dem Bau abgestimmt.
+- [ ] **T2.1 — Angular-Scaffold + Browse/Detail** — exakt gepinntes Angular;
+      Dev-Proxy; typisierter API-Service auf dem Error-Envelope; Browse
+      (paginierte Summaries) + Detail (Makros, `—`/Estimated-Marker,
+      `macroSource`-Badge, Tags/Favorit/Notizen/Zeiten, Zutaten-Notizen).
+      **Fertig, wenn:** `ng build`/`ng test` grün; Liste und Detail rendern ein
+      geseedetes Rezept.
+- [ ] **T2.2 — Add/Edit-Formular + DELETE** — Reactive Forms inkl.
+      Tags/Favorit/Notizen/Zeiten (der einzige Weg, sie zu setzen); `POST`/
+      `PUT /api/recipes/:id`; `DELETE …/:id` → 204.
+      **Fertig, wenn:** Speichern persistiert; Tags und Favorit machen den
+      Round-Trip und werden von den T5.2-Filtern gefunden; 422 bei Invalidem;
+      PUT erhält Picks; Delete kaskadiert.
+- [ ] **T2.3 — Manuelle Makro-Eingabe + Override.**
+      **Fertig, wenn:** manuelle Makros persistieren und rendern; per-100g „—"
+      ohne Gewicht.
+- [ ] **M2-Review** — M1 + M2 ergeben die erste End-to-End-Scheibe.
 
 ---
 
-## Milestone 6 — Deployment & docs ⚪
+## Milestone 3 — Paste-Import mit wählbarer Engine
 
-- [ ] **T6.1 — Docker + nginx + compose** — multi-stage Dockerfile on a **digest-pinned base**; build stage apt-installs deps; slim runtime ships `libpq5`/`libssl`/`libutf8proc`/`ca-certificates`; Postgres init with a **UTF-8 locale**; nginx `/api` + `/uploads` + `/health`; shared `uploads` volume across backend+nginx. **Done when:** `compose up` serves; browse persists; `/api/*`,`/uploads/*`,`/health` reachable; backend-written image served by nginx; in-container OFF search works (CA trust).
-- [ ] **T6.2 — Docs** — env vars, Ollama pointer (verify pull tag), backup, exact apt list + digest, min build RAM, "Docker build is the source of truth". **Done when:** copy-pasteable sequence works: `compose up` → `curl …/health` 200 → POST a recipe → appears in list.
-- [ ] **🚦 M6 review**
+- [ ] **T3.1 — `RuleBasedParser` + `POST /api/parse`** — Social-Captions;
+      utf8proc-NFC, dann eigenes UTF-8-Scanning; Sections/Menge-Einheit/
+      Makro-Block/to-taste/Klammerausdruck→Notiz; `/api/parse` liefert einen
+      partiellen Draft, nie 422.
+      **Fertig, wenn:** 3 Fixtures parsen (Gruppierung, null-Menge, Makro-Block,
+      leere Steps, Umlaut/NFD, die `7%`-Falle); eine partielle Caption → Draft +
+      Warnung.
+- [ ] **T3.2 — `LlmClient` + `LlmParser` (Fallback)** — auf `IHttpClient` (T0.8);
+      Ollama nativ `/api/chat format=schema`; invalid → leerer/partieller Draft +
+      Warnung.
+      **Fertig, wenn:** Fake-Client-Test: valid akzeptiert, malformt → der
+      dokumentierte Fallback.
+- [ ] **T3.3 — Paste-Screen** — Textarea + Engine-Toggle → editierbare Preview →
+      speichern.
+      **Fertig, wenn:** ein regelbasiertes Paste ergibt ein vorbefülltes,
+      speicherbares Formular.
+- [ ] **M3-Review**
 
 ---
 
-## Definition of done (whole phase)
+## Milestone 4 — Makros aus Open Food Facts + LLM-Schätzung
 
-- [ ] All seven milestones complete (M0 + M1–M6), each with its boundary review passed
-- [ ] `docker compose up` runs the full app on a home server / VPS behind VPN or basic-auth **over TLS**
-- [ ] Docs let a fresh setup reach a working app from scratch
-- [ ] Plan + reviews archived to `docs/archive/` (per `docs/archive/README.md`)
+- [ ] **T4.1 — `NutritionSource` + OFF-Client + `foods`-Cache + Converter** —
+      OFF v2 `/api/v2/search` (Limits prüfen) auf T0.8-HTTPS; `foods` (UUID-id
+      PK, code UNIQUE) + FK-Ergänzung; local-first; per-100g-Mapping; Einheit→
+      Gramm (Dichte- und Stück/Löffel-Tabellen).
+      **Fertig, wenn:** Fake-Client-Kandidaten; Cache-Hit → kein Call; nur-kJ
+      umgerechnet/abgewiesen; Einheiten- plus Stück/Löffel-Umrechnung inkl. des
+      geflaggten Pfads.
+- [ ] **T4.2 — Makro-Engine** — Summe → pro Portion + pro 100g; ungepickt/
+      geflaggt → „—"; setzt `macrosEstimated`, wenn Stück/Löffel eingeflossen
+      ist.
+      **Fertig, wenn:** exakte Gramm treffen die handgerechnete Summe
+      (`estimated:false`); Stück/Löffel volles Gewicht (`estimated:true`);
+      geflaggt → „—".
+- [ ] **T4.2b — `POST /api/macros/compute` + Suche-und-Auswahl-UI** — setzt
+      `macroSource:"ingredients"`.
+      **Fertig, wenn:** im Formular Suche → Auswahl → Füllen; Compute korrekt +
+      Provenienz gesetzt.
+- [ ] **T4.3 — `POST /api/macros/estimate` + LLM-Button** — setzt
+      `macroSource:"llm"` + `macrosEstimated:true`.
+      **Fertig, wenn:** Fake-LLM füllt + prüft die Provenienz; der Nutzer kann
+      überschreiben.
+- [ ] **M4-Review**
+
+---
+
+## Milestone 5 — Medien, Politur, Suche
+
+- [ ] **T5.1 — Bild-Upload + Lifecycle** — ergänzt einen Multipart-Parser in
+      `net`; server-generierter Dateiname, ≤ 8 MB während des Streamings
+      erzwungen, Typ per Magic-Bytes; externe URL nur speichern (kein SSRF);
+      GC eigener Dateien bei Delete/PUT.
+      **Fertig, wenn:** valider Upload rendert; übergroß/falscher-Typ/Traversal
+      abgewiesen; extern wird nie gefetcht; Delete/PUT entfernt eigene Dateien.
+- [ ] **T5.2 — Suche / Filter / Sort** — case-insensitives `ILIKE` (UTF-8-Locale,
+      keine Accent-Faltung, keine Extension); Tag-AND-Filter; Favoriten;
+      minProtein/maxCalories; Sort; auf der geklammerten paginierten Liste.
+      **Fertig, wenn:** Teilmengen-Tests (inkl. `Ä`↔`ä`, Kontrolle dass NICHT
+      accent-gefaltet wird), Sorts und Limit-Clamp bestehen.
+- [ ] **M5-Review**
+
+---
+
+## Milestone 6 — Deployment & Docs
+
+- [ ] **T6.1 — Docker + nginx + Compose** — mehrstufiges Dockerfile auf einer
+      per-Digest gepinnten Base; die Build-Stufe apt-installiert die Deps; das
+      schlanke Runtime liefert `libpq5`/`libssl`/`libutf8proc`/`ca-certificates`;
+      Postgres-Init mit UTF-8-Locale; nginx `/api` + `/uploads` + `/health`;
+      geteiltes `uploads`-Volume über Backend und nginx.
+      **Fertig, wenn:** `compose up` liefert aus; Browse persistiert; `/api/*`,
+      `/uploads/*`, `/health` erreichbar; ein vom Backend geschriebenes Bild wird
+      von nginx ausgeliefert; OFF-Suche im Container funktioniert (CA-Trust).
+- [ ] **T6.2 — Docs** — Env-Vars, Ollama-Pointer (Pull-Tag prüfen), Backup,
+      exakte apt-Liste + Digest, minimaler Build-RAM, „der Docker-Build ist die
+      Wahrheit".
+      **Fertig, wenn:** die copy-paste-bare Sequenz funktioniert: `compose up` →
+      `curl …/health` 200 → ein Rezept POSTen → erscheint in der Liste.
+- [ ] **M6-Review**
+
+---
+
+## Definition of Done (ganze Phase)
+
+- [ ] Alle sieben Milestones fertig (M0 + M1–M6), jeder mit bestandenem
+      Grenz-Review
+- [ ] `docker compose up` fährt die komplette App auf einem Home-Server oder VPS
+      hinter VPN oder Basic-Auth über TLS
+- [ ] Die Docs führen ein frisches Setup von Grund auf zu einer laufenden App
+- [ ] Plan + Reviews sind nach `docs/archive/` archiviert (gemäß
+      [`archive/README.md`](archive/README.md))

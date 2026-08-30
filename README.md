@@ -1,51 +1,55 @@
 # mise-en-place
 
-A **single-user, self-hosted web app** to store, browse, and add recipes.
+Eine selbst-gehostete Web-App für eine Person, um Rezepte zu speichern, zu
+durchstöbern und anzulegen.
 
-Recipes can be added two ways: through a **structured form**, or by **pasting a free-text
-caption** (TikTok / Instagram) that gets normalised into one **canonical JSON recipe format**.
-Each recipe renders with optional images and a source link, and shows **macros per portion and
-per 100 g** — computed from [Open Food Facts](https://world.openfoodfacts.org/) (search and
-pick a food per ingredient, cached locally), with a **local-LLM estimate** button and an
-always-editable manual override.
+Rezepte kommen auf zwei Wegen herein: über ein **strukturiertes Formular** oder
+durch das Einfügen einer Freitext-Caption (TikTok, Instagram), die in ein
+einheitliches JSON-Rezeptformat normalisiert wird. Jedes Rezept zeigt optionale
+Bilder, einen Quell-Link und Makros pro Portion und pro 100 g. Die Makros werden
+aus [Open Food Facts](https://world.openfoodfacts.org/) berechnet — pro Zutat
+ein Lebensmittel suchen und auswählen, lokal gecacht — mit einem Button für eine
+Schätzung per lokalem LLM und einer jederzeit editierbaren manuellen Korrektur.
 
-## Why this repo looks the way it does
+## Warum das Repo so aussieht
 
-The backend is written **in C++ from scratch — no web framework** (its own HTTP/1.1 server,
-router, JSON parser + schema validator, PostgreSQL layer over libpq, and HTTPS client over
-OpenSSL). That is a deliberate choice: the point of the project is to **learn C++ (and Angular)
-by building the fundamentals**, not to ship the fastest way. It trades a lot of extra plumbing
-for that learning, and the plan is honest about it.
+Das Backend ist in C++ von Grund auf geschrieben, ohne Web-Framework: ein eigener
+HTTP/1.1-Server, Router, JSON-Parser samt Schema-Validator, eine PostgreSQL-Schicht
+über libpq und ein HTTPS-Client über OpenSSL. Das ist Absicht. Der Zweck des
+Projekts ist, C++ und Angular durch den Bau der Grundlagen zu lernen, nicht
+möglichst schnell zu shippen. Der Preis dafür ist viel zusätzliche
+Plumbing-Arbeit — ein bewusst gewählter Trade-off (siehe D1 im
+[Plan](docs/plans/PLAN_recipe_app_foundation.md)).
 
 ## Stack
 
-| Layer | Choice |
+| Ebene | Wahl |
 |---|---|
-| Backend | **C++20, from scratch** (own HTTP server / router / JSON / schema validator / DB-over-libpq / HTTPS client); only irreducible externals — libpq, OpenSSL, utf8proc, Catch2 — via system `apt` (no package manager) |
-| Frontend | **Angular** SPA (Reactive Forms) |
-| Database | **PostgreSQL** |
-| Nutrition | **Open Food Facts** (search-and-pick, cached) + optional local LLM (Ollama) |
-| Deployment | **Docker Compose** (backend + nginx-served frontend + Postgres); runs on a home server / VPS behind a VPN or basic-auth over TLS |
-| Dev | **WSL2 (Ubuntu)** |
+| Backend | C++20, from scratch (eigener HTTP-Server, Router, JSON, Schema-Validator, DB über libpq, HTTPS-Client); nur die unvermeidbaren Externals libpq, OpenSSL, utf8proc und Catch2 über das System-`apt`, kein Package-Manager |
+| Frontend | Angular-SPA (Reactive Forms) |
+| Datenbank | PostgreSQL |
+| Nutrition | Open Food Facts (suchen und auswählen, gecacht) plus optional ein lokales LLM (Ollama) |
+| Deployment | Docker Compose (Backend, nginx-Frontend, Postgres); läuft auf einem Home-Server oder VPS hinter VPN oder Basic-Auth über TLS |
+| Dev | WSL2 (Ubuntu) |
+
+Begründung und Detail der Stack-Entscheidungen stehen im
+[Plan](docs/plans/PLAN_recipe_app_foundation.md).
 
 ## Status
 
-**Foundation phase — planning complete, implementation not yet started.** The design is fully
-specified and reviewed; no application code exists yet. Development follows a staged,
-plan-gated workflow.
+Foundation-Phase: die Planung ist abgeschlossen, die Implementierung hat noch
+nicht begonnen. Es existiert noch kein App-Code. Den aktuellen Fortschritt führt
+die [ROADMAP](docs/ROADMAP.md); die Spezifikation steht im
+[Plan](docs/plans/PLAN_recipe_app_foundation.md).
 
-- 📋 **Plan:** [`docs/plans/PLAN_recipe_app_foundation.md`](docs/plans/PLAN_recipe_app_foundation.md) — approved
-- ✅ **Progress:** [`docs/ROADMAP.md`](docs/ROADMAP.md) — checkable task tracker (Milestone 0 → M6)
-- 📝 **Reviews:** [`docs/reviews/`](docs/reviews/) — the plan's review history
-
-## Repository layout
+## Repository-Aufbau
 
 ```
-/backend    C++ from-scratch API (Milestone 0 builds the core libraries first)
-/frontend   Angular SPA
-/docs       plan, roadmap, reviews, reference, handoff
+/backend    C++-API from scratch (Milestone 0 baut zuerst die Core-Bibliotheken)
+/frontend   Angular-SPA
+/docs       Plan, Roadmap, Reviews, Referenz, Handoffs
 docker-compose.yml
 ```
 
-_Single-user and unauthenticated this phase — intended to run behind a VPN or a reverse proxy
-with basic-auth over TLS._
+In dieser Phase läuft die App für eine Person und ohne Authentifizierung —
+gedacht hinter einem VPN oder einem Reverse-Proxy mit Basic-Auth über TLS.
